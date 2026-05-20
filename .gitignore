@@ -1,0 +1,13 @@
+node_modules/
+out/
+*.vsix
+*.log
+.DS_Store
+
+# VSCode workspace local
+.vscode/settings.json
+.vscode-test/
+
+# Sources maps + tmp
+*.js.map
+/tmp/

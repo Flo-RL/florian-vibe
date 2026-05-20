@@ -1,0 +1,84 @@
+{
+  "name": "florian-vibe",
+  "displayName": "Florian Vibe",
+  "description": "Chat panel pour Mistral Vibe dans VSCode via ACP. Multi-conversations en onglets, séparation propre thinking/réponse. Inspiré du travail de Nicolas Mallet (vscode-mistral-vibe, Apache-2.0).",
+  "version": "0.1.0",
+  "publisher": "florian-vibe",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "florianVibe.open",
+        "title": "Florian Vibe: Nouvelle conversation",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "florianVibe.openWithFile",
+        "title": "Florian Vibe: Nouvelle conversation avec ce fichier"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "florianVibe.open",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "florianVibe.openWithFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "florianVibe@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "florianVibe.openWithFile",
+          "group": "florianVibe@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "florianVibe.open",
+        "key": "ctrl+alt+v",
+        "mac": "cmd+alt+v"
+      }
+    ],
+    "configuration": {
+      "title": "Florian Vibe",
+      "properties": {
+        "florianVibe.acpBinaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Chemin du binaire vibe-acp. Laisser vide pour auto-détection dans le PATH."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.5",
+    "highlight.js": "^11.11.1",
+    "marked": "^18.0.4",
+    "prismjs": "^1.30.0"
+  }
+}
