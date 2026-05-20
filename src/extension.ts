@@ -17,6 +17,25 @@ interface SessionUpdateNotification {
   update: any;
 }
 
+/** Extrait le texte affichable depuis `content` d'un tool_call ou tool_call_update ACP. */
+function extractToolContent(content: any): string | undefined {
+  if (!Array.isArray(content) || content.length === 0) return undefined;
+  const texts: string[] = [];
+  for (const c of content) {
+    if (!c) continue;
+    if (c.type === "content" && c.content?.text) {
+      texts.push(String(c.content.text));
+    } else if (typeof c.text === "string") {
+      texts.push(c.text);
+    } else if (c.type === "diff" && c.path) {
+      texts.push(`(diff sur ${c.path})`);
+    } else if (c.type === "terminal") {
+      texts.push(`(terminal ${c.terminalId})`);
+    }
+  }
+  return texts.length > 0 ? texts.join("\n") : undefined;
+}
+
 const CLIENT_MODES = [
   { value: "default", name: "Default" },
   { value: "auto-edit", name: "Auto Edit" },
@@ -238,9 +257,11 @@ class ConversationPanel {
   private contextDisabled = false;
   private currentContextFile?: string;
   private hasUnread = false;
+  private titleSetFromPrompt = false;
   private clientMode: ClientMode = "default";
-  private static readonly ICON_IDLE = new vscode.ThemeIcon("comment-discussion");
-  private static readonly ICON_UNREAD = new vscode.ThemeIcon("comment-unresolved");
+  // Icône style Claude (étoile orange). sparkle existe en codicon natif.
+  private static readonly ICON_IDLE = new vscode.ThemeIcon("sparkle", new vscode.ThemeColor("charts.orange"));
+  private static readonly ICON_UNREAD = new vscode.ThemeIcon("sparkle-filled", new vscode.ThemeColor("charts.orange"));
 
   constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -379,6 +400,7 @@ class ConversationPanel {
           toolCallId: update.toolCallId,
           title: update.title ?? update.kind ?? "tool",
           kind: update.kind,
+          content: extractToolContent(update.content),
         });
         break;
       case "tool_call_update":
@@ -386,6 +408,7 @@ class ConversationPanel {
           type: "toolCallUpdate",
           toolCallId: update.toolCallId,
           status: update.status ?? "in_progress",
+          content: extractToolContent(update.content),
         });
         break;
       case "current_mode_update":
@@ -419,6 +442,15 @@ class ConversationPanel {
 
   private async sendPrompt(text: string): Promise<void> {
     if (!text.trim() || !this.sessionId) return;
+
+    // Premier prompt → met à jour le titre de l'onglet avec un résumé du prompt
+    if (!this.titleSetFromPrompt) {
+      const summary = text.replace(/\s+/g, " ").trim().slice(0, 50);
+      if (summary) {
+        this.panel.title = summary + (text.length > 50 ? "…" : "");
+        this.titleSetFromPrompt = true;
+      }
+    }
 
     const blocks: PromptBlock[] = [];
 
@@ -543,15 +575,17 @@ class ConversationPanel {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${cspSource}; script-src ${cspSource} 'nonce-${nonce}';">
 <link rel="stylesheet" href="${prismCss}">
 <style>
-  body { padding: 0; margin: 0; font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); display: flex; flex-direction: column; height: 100vh; --mode-color: var(--vscode-descriptionForeground); }
+  body { padding: 0; margin: 0; font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); display: flex; flex-direction: column; height: 100vh; --mode-color: var(--vscode-descriptionForeground); --send-color: var(--vscode-charts-orange); }
   body.mode-plan { --mode-color: var(--vscode-charts-blue); }
   body.mode-accept { --mode-color: var(--vscode-charts-green); }
   body.mode-auto, body.mode-bypass { --mode-color: var(--vscode-charts-orange); }
   body.mode-chat { --mode-color: var(--vscode-charts-purple); }
-  #log { flex: 1; overflow-y: auto; padding: 16px; max-width: 920px; width: 100%; margin: 0 auto; box-sizing: border-box; }
-  .msg { margin: 10px 0; padding: 10px 12px; border-radius: 6px; white-space: pre-wrap; word-wrap: break-word; line-height: 1.5; }
-  .msg.user { background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--vscode-textLink-foreground); }
-  .msg.assistant { background: var(--vscode-editor-inactiveSelectionBackground); border-left: 3px solid var(--vscode-charts-green); }
+  #log { flex: 1; overflow-y: auto; padding: 16px 20px; width: 100%; margin: 0 auto; box-sizing: border-box; }
+  .msg { margin: 18px 0; padding: 0; background: transparent; border: 0; line-height: 1.55; }
+  .msg.user { background: transparent; padding: 8px 12px; border-radius: 8px; border-left: 0; color: var(--vscode-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); white-space: pre-wrap; word-wrap: break-word; }
+  .msg.assistant { display: flex; align-items: flex-start; gap: 10px; white-space: normal; word-wrap: break-word; }
+  .msg.assistant::before { content: "●"; color: var(--vscode-charts-green); flex-shrink: 0; font-size: 0.7em; line-height: 1; margin-top: 0.55em; }
+  .msg.assistant > .body { flex: 1; min-width: 0; }
   .msg.assistant .body { white-space: normal; }
   .msg.assistant .body p { margin: 0.5em 0; white-space: pre-wrap; }
   .msg.assistant .body p:first-child { margin-top: 0; }
@@ -575,12 +609,29 @@ class ConversationPanel {
   .msg.assistant .body a { color: var(--vscode-textLink-foreground); }
   .msg.assistant .body hr { border: 0; border-top: 1px solid var(--vscode-panel-border); margin: 0.8em 0; }
   .msg.assistant .body strong { font-weight: 600; }
-  .msg.thought { background: transparent; border-left: 2px dashed var(--vscode-descriptionForeground); color: var(--vscode-descriptionForeground); font-size: 0.88em; opacity: 0.85; }
-  .msg.thought .body { font-style: italic; }
-  .msg.thought .body.collapsed { display: none; }
-  .msg.thought .role { cursor: pointer; }
+  .msg.thought { display: flex; align-items: flex-start; gap: 10px; color: var(--vscode-descriptionForeground); font-size: 0.92em; }
+  .msg.thought::before { content: "●"; flex-shrink: 0; font-size: 0.7em; line-height: 1; margin-top: 0.55em; color: var(--vscode-descriptionForeground); }
+  .msg.thought .body { flex: 1; min-width: 0; color: var(--vscode-descriptionForeground); }
+  .msg.thought .thinking-label { font-weight: 500; cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 4px; }
+  .msg.thought .thinking-label .caret { opacity: 0.5; font-size: 0.85em; transition: transform 0.15s; }
+  .msg.thought.expanded .thinking-label .caret { transform: rotate(180deg); }
+  .msg.thought .thinking-content { font-style: italic; margin-top: 6px; white-space: pre-wrap; word-wrap: break-word; padding-left: 0; border-left: 0; }
+  .msg.thought .thinking-content.collapsed { display: none; }
   .msg.system { color: var(--vscode-descriptionForeground); font-size: 0.85em; padding: 4px 12px; }
-  .msg.tool { background: var(--vscode-textCodeBlock-background); font-family: var(--vscode-editor-font-family); font-size: 0.9em; border-left: 3px solid var(--vscode-charts-orange); }
+  .thinking-indicator { display: flex; align-items: center; gap: 10px; color: var(--vscode-descriptionForeground); font-size: 0.92em; margin: 18px 0; padding: 0; }
+  .thinking-indicator::before { content: "●"; color: var(--vscode-charts-orange); flex-shrink: 0; font-size: 0.7em; line-height: 1; margin-top: 0.55em; animation: vibe-pulse 1.2s ease-in-out infinite; }
+  @keyframes vibe-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .msg.tool { display: flex; align-items: flex-start; gap: 10px; }
+  .msg.tool::before { content: "●"; color: var(--vscode-charts-orange); flex-shrink: 0; font-size: 0.7em; line-height: 1; margin-top: 0.55em; }
+  .msg.tool.tool-completed::before { color: var(--vscode-charts-green); }
+  .msg.tool.tool-failed::before { color: var(--vscode-charts-red); }
+  .msg.tool .body { flex: 1; min-width: 0; }
+  .msg.tool .tool-header { font-weight: 600; margin-bottom: 6px; line-height: 1.4; }
+  .msg.tool .tool-header .tool-kind { color: var(--vscode-charts-orange); font-family: var(--vscode-editor-font-family); }
+  .msg.tool .tool-header .tool-title { color: var(--vscode-descriptionForeground); font-weight: normal; margin-left: 6px; font-size: 0.95em; }
+  .msg.tool .tool-block { font-family: var(--vscode-editor-font-family); font-size: 0.88em; background: var(--vscode-textCodeBlock-background); border-radius: 4px; padding: 8px 10px; margin: 4px 0; max-height: 240px; overflow-y: auto; }
+  .msg.tool .tool-block-label { font-size: 0.7em; font-weight: 600; opacity: 0.6; text-transform: uppercase; margin-bottom: 4px; letter-spacing: 0.5px; }
+  .msg.tool .tool-block-content { white-space: pre-wrap; word-wrap: break-word; }
   .msg.diff { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-panel-border); padding: 0; overflow: hidden; }
   .diff-header { padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; background: var(--vscode-editor-background); border-bottom: 1px solid var(--vscode-panel-border); font-size: 0.9em; }
   .diff-header .path { font-family: var(--vscode-editor-font-family); font-weight: 600; }
@@ -599,29 +650,28 @@ class ConversationPanel {
   .diff-actions .accept { background: var(--vscode-charts-green); color: var(--vscode-foreground); }
   .diff-actions .reject { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .diff-actions .done { color: var(--vscode-descriptionForeground); padding: 4px 14px; font-size: 0.85em; }
-  .role { font-size: 0.72em; font-weight: 600; opacity: 0.7; text-transform: uppercase; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
-  .toggle { cursor: pointer; user-select: none; }
-  .body.collapsed { display: none; }
   #input-area { padding: 12px 16px 14px; max-width: 920px; width: 100%; margin: 0 auto; box-sizing: border-box; }
   #compose { background: var(--vscode-input-background); border: 1px solid var(--mode-color); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; transition: border-color 0.15s, box-shadow 0.15s; }
   #compose:focus-within { box-shadow: 0 0 0 1px var(--mode-color); }
-  #active-file { display: none; align-items: center; gap: 6px; font-size: 0.82em; }
+  #active-file { display: none; align-items: center; gap: 4px; font-size: 0.82em; }
   #active-file.visible { display: inline-flex; }
-  #active-file .chip { background: transparent; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); padding: 2px 8px; border-radius: 10px; font-family: var(--vscode-editor-font-family); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: opacity 0.15s, color 0.15s; }
-  #active-file .chip:hover { background: var(--vscode-list-hoverBackground); }
-  #active-file .chip.disabled { opacity: 0.55; color: var(--vscode-descriptionForeground); }
+  #active-file .chip { background: transparent; border: 0; padding: 2px 6px; border-radius: 6px; font-family: var(--vscode-editor-font-family); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; color: var(--vscode-descriptionForeground); transition: color 0.15s, background 0.15s; }
+  #active-file .chip:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
+  #active-file .chip.disabled { opacity: 0.5; }
   #active-file .chip.disabled #active-file-name { text-decoration: line-through; }
-  #active-file .chip .eye { width: 14px; height: 14px; flex-shrink: 0; opacity: 0.7; }
+  #active-file .chip .eye { width: 13px; height: 13px; flex-shrink: 0; opacity: 0.7; }
   #active-file .chip:hover .eye { opacity: 1; }
   #active-file .chip .eye-closed { display: none; }
   #active-file .chip.disabled .eye-open { display: none; }
   #active-file .chip.disabled .eye-closed { display: inline-block; }
-  #active-file .label { color: var(--vscode-descriptionForeground); }
+  #active-file .file-icon { font-size: 0.95em; opacity: 0.7; }
+  .compose-action-btn { background: transparent; color: var(--vscode-descriptionForeground); border: 0; padding: 4px 6px; border-radius: 6px; cursor: pointer; font-size: 1em; line-height: 1; display: inline-flex; align-items: center; justify-content: center; min-width: 22px; }
+  .compose-action-btn:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
   #prompt { background: transparent; color: var(--vscode-input-foreground); border: 0; outline: none; padding: 4px 0; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); resize: none; min-height: 28px; max-height: 200px; width: 100%; box-sizing: border-box; overflow-y: auto; }
   #compose-actions { display: flex; align-items: center; gap: 8px; }
   #compose-actions .left { display: flex; gap: 6px; align-items: center; flex: 1; }
   #compose-actions .right { display: flex; gap: 6px; align-items: center; }
-  #send-btn { background: var(--mode-color); color: var(--vscode-button-foreground); border: none; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; font-size: 1em; padding: 0; transition: background 0.15s, filter 0.15s; }
+  #send-btn { background: var(--send-color); color: var(--vscode-button-foreground); border: none; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; font-size: 1em; padding: 0; transition: filter 0.15s; }
   #send-btn:hover { filter: brightness(1.15); }
   #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   #cancel-btn { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 3px 10px; border-radius: 12px; font-size: 0.82em; cursor: pointer; }
@@ -652,16 +702,19 @@ class ConversationPanel {
   <div id="log"></div>
   <div id="input-area">
     <div id="compose">
-      <div id="active-file">
-        <span class="chip" id="active-file-chip" title="Cliquer pour inclure/exclure du contexte">
-          <span id="active-file-name"></span>
-          <svg class="eye eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-          <svg class="eye eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-        </span>
-      </div>
-      <textarea id="prompt" placeholder="Demande à Vibe…" rows="1" disabled></textarea>
+      <textarea id="prompt" placeholder="ctrl esc to focus or unfocus Vibe" rows="1" disabled></textarea>
       <div id="compose-actions">
         <div class="left">
+          <button class="compose-action-btn" id="upload-btn" type="button" title="Joindre (à venir)" disabled style="opacity:0.4">+</button>
+          <button class="compose-action-btn" id="slash-btn" type="button" title="Slash commands (à venir)" disabled style="opacity:0.4">/</button>
+          <div id="active-file">
+            <span class="chip" id="active-file-chip" title="Cliquer pour inclure/exclure du contexte">
+              <span class="file-icon">📄</span>
+              <span id="active-file-name"></span>
+              <svg class="eye eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </span>
+          </div>
         </div>
         <div class="right">
           <div id="mode-wrapper">
@@ -712,6 +765,22 @@ class ConversationPanel {
   // Blocs indexés par (messageId + role) → garantit thought et assistant séparés.
   const blocks = new Map();
   let busy = false;
+  let thinkingIndicator = null;
+
+  function showThinkingIndicator() {
+    if (thinkingIndicator) return;
+    thinkingIndicator = document.createElement('div');
+    thinkingIndicator.className = 'thinking-indicator';
+    thinkingIndicator.textContent = 'Processing…';
+    log.appendChild(thinkingIndicator);
+    log.scrollTop = log.scrollHeight;
+  }
+  function hideThinkingIndicator() {
+    if (thinkingIndicator) {
+      thinkingIndicator.remove();
+      thinkingIndicator = null;
+    }
+  }
   const activeFileEl = document.getElementById('active-file');
   const activeFileNameEl = document.getElementById('active-file-name');
   const modeWrapperEl = document.getElementById('mode-wrapper');
@@ -821,39 +890,45 @@ class ConversationPanel {
     vscode.postMessage({ type: 'toggleContext' });
   });
 
+  const defaultPlaceholder = 'ctrl esc to focus or unfocus Vibe';
+  const busyPlaceholder = 'Queue another message…';
   function setBusy(v) {
     busy = v;
     sendBtn.disabled = v;
     cancelBtn.style.display = v ? '' : 'none';
+    input.placeholder = v ? busyPlaceholder : defaultPlaceholder;
+    if (v) showThinkingIndicator();
+    else hideThinkingIndicator();
   }
 
   function createBlock(role, messageId) {
     const div = document.createElement('div');
     div.className = 'msg ' + role;
-    const label = document.createElement('div');
-    label.className = 'role';
-    const labelText = document.createElement('span');
-    labelText.textContent = role === 'user' ? 'Toi'
-      : role === 'assistant' ? 'Vibe'
-      : role === 'thought' ? 'Réflexion'
-      : 'Système';
-    label.appendChild(labelText);
-    const body = document.createElement('div');
-    body.className = 'body';
+
     if (role === 'thought') {
-      body.classList.add('collapsed'); // masqué par défaut
-      const toggle = document.createElement('span');
-      toggle.className = 'toggle';
-      toggle.textContent = '[afficher]';
-      label.appendChild(toggle);
-      label.classList.add('toggle');
+      // ● Thinking ▾ (collapsible, OUVERT par défaut pour visibilité)
+      const body = document.createElement('div');
+      body.className = 'body';
+      const label = document.createElement('span');
+      label.className = 'thinking-label';
+      label.innerHTML = 'Thinking <span class="caret">▾</span>';
+      const content = document.createElement('div');
+      content.className = 'thinking-content';
+      div.classList.add('expanded');
       label.addEventListener('click', () => {
-        body.classList.toggle('collapsed');
-        toggle.textContent = body.classList.contains('collapsed') ? '[afficher]' : '[masquer]';
+        content.classList.toggle('collapsed');
+        div.classList.toggle('expanded');
       });
+      body.appendChild(label);
+      body.appendChild(content);
+      div.appendChild(body);
+    } else {
+      // user / assistant / system : juste un body, le puce est en CSS ::before
+      const body = document.createElement('div');
+      body.className = 'body';
+      div.appendChild(body);
     }
-    div.appendChild(label);
-    div.appendChild(body);
+
     log.appendChild(div);
     return div;
   }
@@ -868,24 +943,29 @@ class ConversationPanel {
       div = createBlock(role, messageId);
       blocks.set(key, div);
       blockText.set(key, '');
+      // Garde "Processing…" en bas, après tout nouveau message
+      if (thinkingIndicator) log.appendChild(thinkingIndicator);
     }
     const accumulated = (blockText.get(key) || '') + text;
     blockText.set(key, accumulated);
-    const body = div.querySelector('.body');
+    // Pour les thought, on écrit dans .thinking-content (préserve le label "● Thinking ▾")
+    const target = role === 'thought'
+      ? div.querySelector('.thinking-content')
+      : div.querySelector('.body');
     // Markdown rendering uniquement pour les réponses assistant ; thought/user restent en texte brut
     if (role === 'assistant') {
       const html = renderMarkdown(accumulated);
       if (html !== null) {
-        body.innerHTML = html;
+        target.innerHTML = html;
         // Coloration syntaxique Prism sur les blocs de code ajoutés
         if (typeof Prism !== 'undefined' && Prism.highlightAllUnder) {
-          try { Prism.highlightAllUnder(body); } catch (_e) {}
+          try { Prism.highlightAllUnder(target); } catch (_e) {}
         }
       } else {
-        body.textContent = accumulated;
+        target.textContent = accumulated;
       }
     } else {
-      body.textContent = accumulated;
+      target.textContent = accumulated;
     }
     log.scrollTop = log.scrollHeight;
   }
@@ -993,20 +1073,57 @@ class ConversationPanel {
     log.scrollTop = log.scrollHeight;
   }
 
-  function addToolCall(toolCallId, title, kind) {
+  function addToolCall(toolCallId, title, kind, content) {
     const div = document.createElement('div');
     div.className = 'msg tool';
     div.dataset.toolCallId = toolCallId;
-    const label = document.createElement('div');
-    label.className = 'role';
-    label.textContent = 'Outil · ' + (kind ?? 'tool') + ' · en cours';
+
     const body = document.createElement('div');
     body.className = 'body';
-    body.textContent = title;
-    div.appendChild(label);
+
+    // Header : kind (Bash, Read, Edit...) + title descriptif (List files...)
+    const header = document.createElement('div');
+    header.className = 'tool-header';
+    const kindSpan = document.createElement('span');
+    kindSpan.className = 'tool-kind';
+    kindSpan.textContent = capitalize(kind || 'Tool');
+    header.appendChild(kindSpan);
+    if (title && title !== kind) {
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'tool-title';
+      titleSpan.textContent = title;
+      header.appendChild(titleSpan);
+    }
+    body.appendChild(header);
+
+    // Bloc IN (commande)
+    if (content) {
+      appendToolBlock(body, 'IN', content);
+    }
+
     div.appendChild(body);
     log.appendChild(div);
+    if (thinkingIndicator) log.appendChild(thinkingIndicator); // remet en bas
     log.scrollTop = log.scrollHeight;
+  }
+
+  function appendToolBlock(toolBodyEl, labelText, contentText) {
+    const blockEl = document.createElement('div');
+    blockEl.className = 'tool-block';
+    const lbl = document.createElement('div');
+    lbl.className = 'tool-block-label';
+    lbl.textContent = labelText;
+    const cnt = document.createElement('div');
+    cnt.className = 'tool-block-content';
+    cnt.textContent = contentText;
+    blockEl.appendChild(lbl);
+    blockEl.appendChild(cnt);
+    toolBodyEl.appendChild(blockEl);
+  }
+
+  function capitalize(s) {
+    if (!s) return '';
+    return String(s).charAt(0).toUpperCase() + String(s).slice(1);
   }
 
   function send() {
@@ -1060,17 +1177,21 @@ class ConversationPanel {
         appendToBlock(m.role, m.messageId, m.text);
         break;
       case 'toolCall':
-        addToolCall(m.toolCallId, m.title, m.kind);
+        addToolCall(m.toolCallId, m.title, m.kind, m.content);
         break;
       case 'diffProposal':
         addDiffProposal(m.diffId, m.relativePath, m.isNewFile, m.diff);
         break;
       case 'toolCallUpdate': {
         const el = log.querySelector('.msg.tool[data-tool-call-id="' + m.toolCallId + '"]');
-        if (el) {
-          const label = el.querySelector('.role');
-          if (label) label.textContent = label.textContent.replace(/· (en cours|completed|failed|in_progress)$/, '· ' + m.status);
+        if (!el) break;
+        const toolBody = el.querySelector('.body');
+        if (m.content && toolBody && !el.dataset.hasOut) {
+          appendToolBlock(toolBody, 'OUT', m.content);
+          el.dataset.hasOut = '1';
         }
+        if (m.status === 'completed') el.classList.add('tool-completed');
+        else if (m.status === 'failed') el.classList.add('tool-failed');
         break;
       }
       case 'streamEnd':
