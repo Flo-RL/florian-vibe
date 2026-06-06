@@ -1,16 +1,17 @@
 import * as vscode from "vscode";
 import * as fs from "fs/promises";
+import { execFile } from "child_process";
 import { randomUUID } from "crypto";
 import { AcpClient } from "./acp-client";
 import { prepareDiff, DiffLine } from "./diff-view";
 import { askPermission } from "./permission";
+import { describeImage, InlineImage } from "./vision";
 
 const EXTENSION_VERSION = "0.1.0";
 
-interface PromptBlock {
-  type: "text";
-  text: string;
-}
+type PromptBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; mimeType: string; data: string }; // data = base64 sans préfixe `data:`
 
 interface SessionUpdateNotification {
   sessionId: string;
@@ -132,6 +133,50 @@ class FlorianVibe {
       },
     });
     this.output.appendLine(`[ACP] Connecté à ${initResult?.agentInfo?.title} v${initResult?.agentInfo?.version}`);
+
+    // Détecte si vibe-acp accepte les images (patché). Sinon, propose le patch.
+    // Non bloquant : on n'attend pas la réponse de l'utilisateur pour finir la connexion.
+    const imageSupported = initResult?.agentCapabilities?.promptCapabilities?.image === true;
+    void this.checkImageSupport(imageSupported);
+  }
+
+  /**
+   * Si vibe-acp n'annonce pas le support image, c'est que le patch est absent
+   * (typiquement après un `uv tool upgrade mistral-vibe`). On propose de le relancer.
+   */
+  private async checkImageSupport(supported: boolean): Promise<void> {
+    if (supported) return;
+    this.output.appendLine("[ACP] vibe-acp sans support image (patch absent)");
+    const choice = await vscode.window.showWarningMessage(
+      "Florian Vibe : vibe-acp ne supporte pas les images (patch absent — souvent après une mise à jour de Vibe). L'upload d'images ne fonctionnera pas.",
+      "Appliquer le patch",
+      "Ignorer"
+    );
+    if (choice !== "Appliquer le patch") return;
+    try {
+      const out = await this.applyImagePatch();
+      this.output.appendLine(`[patch] ${out}`);
+      vscode.window.showInformationMessage(
+        "Patch image appliqué. Rechargez la fenêtre (commande « Developer: Reload Window ») pour relancer vibe-acp."
+      );
+    } catch (e: any) {
+      vscode.window.showErrorMessage(`Échec du patch image : ${e?.message}`);
+    }
+  }
+
+  /** Lance scripts/patch-vibe-images.py (livré avec l'extension). */
+  private applyImagePatch(): Promise<string> {
+    const script = vscode.Uri.joinPath(
+      this.context.extensionUri,
+      "scripts",
+      "patch-vibe-images.py"
+    ).fsPath;
+    return new Promise<string>((resolve, reject) => {
+      execFile("python3", [script], { timeout: 30000 }, (err, stdout, stderr) => {
+        if (err) reject(new Error(stderr.trim() || err.message));
+        else resolve((stdout + stderr).trim());
+      });
+    });
   }
 
   private registerAcpHandlers(client: AcpClient): void {
@@ -290,7 +335,7 @@ class ConversationPanel {
       switch (msg.type) {
         case "send":
           this.onActivate();
-          await this.sendPrompt(msg.text as string);
+          await this.sendPrompt(msg.text as string, (msg.images as InlineImage[]) ?? []);
           break;
         case "cancel":
           this.cancel();
@@ -440,8 +485,8 @@ class ConversationPanel {
     this.post({ type: "system", text: "Connexion ACP perdue." });
   }
 
-  private async sendPrompt(text: string): Promise<void> {
-    if (!text.trim() || !this.sessionId) return;
+  private async sendPrompt(text: string, images: InlineImage[] = []): Promise<void> {
+    if ((!text.trim() && images.length === 0) || !this.sessionId) return;
 
     // Premier prompt → met à jour le titre de l'onglet avec un résumé du prompt
     if (!this.titleSetFromPrompt) {
@@ -490,11 +535,21 @@ class ConversationPanel {
       this.output.appendLine(`[ctx] aucun contexte fichier (disabled=${this.contextDisabled}, uri=${this.getActiveUri()?.toString() ?? "none"})`);
     }
 
-    blocks.push({ type: "text", text });
+    if (text.trim()) blocks.push({ type: "text", text });
+
+    // Chemin A : blocs image natifs ACP (`{ type: "image", mimeType, data }`).
+    for (const img of images) {
+      blocks.push({ type: "image", mimeType: img.mimeType, data: img.data });
+    }
+    if (images.length > 0) {
+      this.output.appendLine(`[image] ${images.length} image(s) jointe(s) (chemin A : bloc ACP natif)`);
+    }
 
     const messageId = randomUUID();
     this.currentMessageId = messageId;
-    this.post({ type: "userMessage", messageId, text });
+    // L'affichage des images se fait côté webview via des chips cliquables (pas de suffixe texte).
+    const userText = text;
+    this.post({ type: "userMessage", messageId, text: userText });
 
     try {
       await this.client.sendRequest("session/prompt", {
@@ -505,6 +560,40 @@ class ConversationPanel {
       this.post({ type: "streamEnd", messageId });
       this.markUnread();
     } catch (e: any) {
+      // Chemin A a échoué. Si des images étaient jointes, c'est probablement que
+      // vibe-acp refuse les blocs image → fallback B : on les décrit en texte.
+      if (images.length > 0) {
+        this.output.appendLine(
+          `[image] chemin A refusé (${e?.message}) → fallback B (description texte)`
+        );
+        try {
+          const textBlocks: PromptBlock[] = blocks.filter((b) => b.type === "text");
+          for (let i = 0; i < images.length; i++) {
+            const desc = await describeImage(images[i]);
+            textBlocks.push({
+              type: "text",
+              text: `[Image ${i + 1} (jointe, décrite automatiquement)]\n${desc}\n`,
+            });
+          }
+          await this.client.sendRequest("session/prompt", {
+            sessionId: this.sessionId,
+            prompt: textBlocks,
+            messageId,
+          });
+          this.post({ type: "system", text: "ℹ️ Images transmises via description texte (fallback)." });
+          this.post({ type: "streamEnd", messageId });
+          this.markUnread();
+          return;
+        } catch (e2: any) {
+          this.post({ type: "streamEnd", messageId, error: e2?.message });
+          this.post({
+            type: "system",
+            text: `Image non transmise — chemin A : ${e?.message} ; fallback B : ${e2?.message}`,
+          });
+          this.markUnread();
+          return;
+        }
+      }
       this.post({ type: "streamEnd", messageId, error: e?.message });
       this.post({ type: "system", text: `Prompt échoué : ${e?.message}` });
       this.markUnread();
@@ -572,7 +661,7 @@ class ConversationPanel {
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${cspSource}; script-src ${cspSource} 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data: blob:; style-src 'unsafe-inline' ${cspSource}; script-src ${cspSource} 'nonce-${nonce}';">
 <link rel="stylesheet" href="${prismCss}">
 <style>
   body { padding: 0; margin: 0; font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); display: flex; flex-direction: column; height: 100vh; --mode-color: var(--vscode-descriptionForeground); --send-color: var(--vscode-charts-orange); }
@@ -653,6 +742,23 @@ class ConversationPanel {
   #input-area { padding: 12px 16px 14px; max-width: 920px; width: 100%; margin: 0 auto; box-sizing: border-box; }
   #compose { background: var(--vscode-input-background); border: 1px solid var(--mode-color); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; transition: border-color 0.15s, box-shadow 0.15s; }
   #compose:focus-within { box-shadow: 0 0 0 1px var(--mode-color); }
+  #compose.dragover { border-color: var(--mode-color); box-shadow: 0 0 0 2px var(--mode-color); }
+  #attachments { display: flex; flex-wrap: wrap; gap: 6px; }
+  #attachments:empty { display: none; }
+  .attachment { position: relative; width: 52px; height: 52px; border-radius: 8px; overflow: hidden; border: 1px solid var(--vscode-panel-border); background: var(--vscode-input-background); }
+  .attachment img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .attachment .remove { position: absolute; top: 1px; right: 1px; width: 16px; height: 16px; border-radius: 50%; border: 0; cursor: pointer; background: rgba(0,0,0,0.6); color: #fff; font-size: 11px; line-height: 16px; padding: 0; display: flex; align-items: center; justify-content: center; }
+  .attachment .remove:hover { background: rgba(0,0,0,0.85); }
+  .msg .user-image { max-width: 220px; max-height: 220px; border-radius: 8px; margin-top: 6px; display: block; }
+  .msg .user-images { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .img-chip { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; padding: 4px 10px 4px 5px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 8px; background: var(--vscode-input-background); cursor: pointer; font-size: 0.85em; transition: background 0.15s, border-color 0.15s; }
+  .img-chip:hover { background: var(--vscode-list-hoverBackground); border-color: var(--mode-color); }
+  .img-chip .thumb { width: 26px; height: 26px; border-radius: 5px; object-fit: cover; flex-shrink: 0; display: block; }
+  .img-chip .name { color: var(--vscode-foreground); font-family: var(--vscode-editor-font-family); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+  .img-chip .dims { color: var(--vscode-descriptionForeground); flex-shrink: 0; }
+  #lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: none; align-items: center; justify-content: center; z-index: 99999; cursor: zoom-out; padding: 32px; box-sizing: border-box; }
+  #lightbox.visible { display: flex; }
+  #lightbox img { max-width: 100%; max-height: 100%; border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,0.6); }
   #active-file { display: none; align-items: center; gap: 4px; font-size: 0.82em; }
   #active-file.visible { display: inline-flex; }
   #active-file .chip { background: transparent; border: 0; padding: 2px 6px; border-radius: 6px; font-family: var(--vscode-editor-font-family); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; color: var(--vscode-descriptionForeground); transition: color 0.15s, background 0.15s; }
@@ -702,10 +808,12 @@ class ConversationPanel {
   <div id="log"></div>
   <div id="input-area">
     <div id="compose">
+      <div id="attachments"></div>
       <textarea id="prompt" placeholder="ctrl esc to focus or unfocus Vibe" rows="1" disabled></textarea>
+      <input type="file" id="file-input" accept="image/*" multiple style="display:none">
       <div id="compose-actions">
         <div class="left">
-          <button class="compose-action-btn" id="upload-btn" type="button" title="Joindre (à venir)" disabled style="opacity:0.4">+</button>
+          <button class="compose-action-btn" id="upload-btn" type="button" title="Joindre une image (ou coller / glisser-déposer)" disabled>+</button>
           <button class="compose-action-btn" id="slash-btn" type="button" title="Slash commands (à venir)" disabled style="opacity:0.4">/</button>
           <div id="active-file">
             <span class="chip" id="active-file-chip" title="Cliquer pour inclure/exclure du contexte">
@@ -731,6 +839,7 @@ class ConversationPanel {
     </div>
     <div id="status">Connexion à vibe-acp…</div>
   </div>
+  <div id="lightbox"><img alt="aperçu"></div>
 <script nonce="${nonce}">
   let vscode;
   try { vscode = acquireVsCodeApi(); } catch (e) { console.error('acquireVsCodeApi failed', e); }
@@ -760,6 +869,10 @@ class ConversationPanel {
   const input = document.getElementById('prompt');
   const sendBtn = document.getElementById('send-btn');
   const cancelBtn = document.getElementById('cancel-btn');
+  const composeEl = document.getElementById('compose');
+  const uploadBtn = document.getElementById('upload-btn');
+  const fileInput = document.getElementById('file-input');
+  const attachmentsEl = document.getElementById('attachments');
   const status = document.getElementById('status');
 
   // Blocs indexés par (messageId + role) → garantit thought et assistant séparés.
@@ -1126,12 +1239,164 @@ class ConversationPanel {
     return String(s).charAt(0).toUpperCase() + String(s).slice(1);
   }
 
+  // --- Pièces jointes images (chemin A : bloc ACP natif, fallback B côté extension) ---
+  // Plafond aligné sur la limite vision de l'API Mistral (Pixtral / mistral-medium) : 8 images / requête.
+  const MAX_IMAGES = 8;
+  let attachments = []; // [{ mimeType, data (base64), dataUrl, name, width, height }]
+  let pendingReads = 0; // lectures FileReader en cours (compte pour le plafond avant le push)
+  let sendRequested = false; // envoi demandé pendant que des images chargent encore
+  let pendingUserImages = []; // images du dernier envoi, en attente d'affichage dans le message user
+
+  function openLightbox(src) {
+    const lb = document.getElementById('lightbox');
+    lb.querySelector('img').src = src;
+    lb.classList.add('visible');
+  }
+  (function () {
+    const lb = document.getElementById('lightbox');
+    if (lb) lb.addEventListener('click', () => lb.classList.remove('visible'));
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && lb) lb.classList.remove('visible');
+    });
+  })();
+
+  // Affiche les images d'un message user sous forme de chips cliquables (façon Claude Code)
+  function attachUserImages(messageId, imgs) {
+    const div = blocks.get(messageId + ':user');
+    if (!div) return;
+    const body = div.querySelector('.body') || div;
+    const row = document.createElement('div');
+    row.className = 'user-images';
+    imgs.forEach((im) => {
+      const chip = document.createElement('div');
+      chip.className = 'img-chip';
+      chip.title = 'Cliquer pour agrandir';
+      const thumb = document.createElement('img');
+      thumb.className = 'thumb';
+      thumb.src = im.dataUrl;
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = im.name || 'image.png';
+      chip.appendChild(thumb);
+      chip.appendChild(name);
+      if (im.width && im.height) {
+        const dims = document.createElement('span');
+        dims.className = 'dims';
+        dims.textContent = im.width + '×' + im.height;
+        chip.appendChild(dims);
+      }
+      chip.addEventListener('click', () => openLightbox(im.dataUrl));
+      row.appendChild(chip);
+    });
+    body.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function renderAttachments() {
+    attachmentsEl.innerHTML = '';
+    attachments.forEach((att, idx) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'attachment';
+      const img = document.createElement('img');
+      img.src = att.dataUrl;
+      wrap.appendChild(img);
+      const rm = document.createElement('button');
+      rm.className = 'remove';
+      rm.type = 'button';
+      rm.textContent = '×';
+      rm.title = 'Retirer';
+      rm.addEventListener('click', () => { attachments.splice(idx, 1); renderAttachments(); });
+      wrap.appendChild(rm);
+      attachmentsEl.appendChild(wrap);
+    });
+  }
+
+  // Renvoie false si l'image est refusée (pas une image, ou plafond MAX_IMAGES atteint).
+  function addImageFile(file) {
+    if (!file || !file.type || file.type.indexOf('image/') !== 0) return false;
+    if (attachments.length + pendingReads >= MAX_IMAGES) return false;
+    pendingReads++;
+    const reader = new FileReader();
+    reader.onload = () => {
+      pendingReads--;
+      const dataUrl = String(reader.result);
+      const comma = dataUrl.indexOf(',');
+      const data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl; // base64 sans préfixe
+      const att = { mimeType: file.type, data, dataUrl, name: file.name || 'image.png', width: 0, height: 0 };
+      attachments.push(att);
+      // Mesure les dimensions réelles pour le chip "nom · LxH" (façon Claude Code)
+      const probe = new Image();
+      probe.onload = () => { att.width = probe.naturalWidth; att.height = probe.naturalHeight; };
+      probe.src = dataUrl;
+      renderAttachments();
+      // Si un envoi a été demandé pendant le chargement, on l'enchaîne dès que tout est prêt
+      if (pendingReads === 0 && sendRequested) send();
+    };
+    reader.onerror = () => {
+      pendingReads--;
+      debug('lecture image échouée');
+      if (pendingReads === 0 && sendRequested) send();
+    };
+    reader.readAsDataURL(file);
+    return true;
+  }
+
+  function addFiles(fileList) {
+    let skipped = false;
+    for (const f of fileList) {
+      if (f && f.type && f.type.indexOf('image/') === 0 && !addImageFile(f)) skipped = true;
+    }
+    if (skipped) addSystemMessage('Limite de ' + MAX_IMAGES + ' images par message atteinte (limite API Mistral vision).');
+  }
+
+  uploadBtn.addEventListener('click', () => { if (!busy) fileInput.click(); });
+  fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
+
+  // Coller une image depuis le presse-papier
+  input.addEventListener('paste', (e) => {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    let hadImage = false;
+    for (const it of items) {
+      if (it.kind === 'file' && it.type.indexOf('image/') === 0) {
+        const file = it.getAsFile();
+        if (file) {
+          hadImage = true;
+          if (!addImageFile(file)) addSystemMessage('Limite de ' + MAX_IMAGES + ' images par message atteinte (limite API Mistral vision).');
+        }
+      }
+    }
+    if (hadImage) e.preventDefault();
+  });
+
+  // Glisser-déposer sur le compose
+  ['dragenter', 'dragover'].forEach((ev) => composeEl.addEventListener(ev, (e) => {
+    e.preventDefault(); composeEl.classList.add('dragover');
+  }));
+  ['dragleave', 'drop'].forEach((ev) => composeEl.addEventListener(ev, (e) => {
+    e.preventDefault(); composeEl.classList.remove('dragover');
+  }));
+  composeEl.addEventListener('drop', (e) => {
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+  });
+
   function send() {
+    if (busy) return;
     const text = input.value.trim();
-    if (!text || busy) return;
-    vscode.postMessage({ type: 'send', text });
+    if (!text && attachments.length === 0 && pendingReads === 0) return;
+    // Des images finissent de charger : on diffère l'envoi (relancé depuis FileReader.onload)
+    if (pendingReads > 0) {
+      sendRequested = true;
+      status.textContent = 'Chargement des images…';
+      return;
+    }
+    sendRequested = false;
+    const images = attachments.map((a) => ({ mimeType: a.mimeType, data: a.data }));
+    vscode.postMessage({ type: 'send', text, images });
     input.value = '';
     input.style.height = 'auto';
+    pendingUserImages = attachments.slice(); // gardés pour l'affichage en chips au retour du userMessage
+    attachments = [];
+    renderAttachments();
     setBusy(true);
   }
 
@@ -1157,6 +1422,7 @@ class ConversationPanel {
         status.textContent = 'Session : ' + (m.currentModelId ?? 'prête');
         input.disabled = false;
         sendBtn.disabled = false;
+        uploadBtn.disabled = false;
         input.focus();
         availableModes = Array.isArray(m.modes) ? m.modes : [];
         currentModeId = m.currentModeId || (availableModes[0] && availableModes[0].value) || null;
@@ -1172,6 +1438,10 @@ class ConversationPanel {
         break;
       case 'userMessage':
         appendToBlock('user', m.messageId, m.text);
+        if (pendingUserImages.length) {
+          attachUserImages(m.messageId, pendingUserImages);
+          pendingUserImages = [];
+        }
         break;
       case 'chunk':
         appendToBlock(m.role, m.messageId, m.text);

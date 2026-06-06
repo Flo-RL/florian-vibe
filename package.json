@@ -62,6 +62,16 @@
           "type": "string",
           "default": "",
           "description": "Chemin du binaire vibe-acp. Laisser vide pour auto-détection dans le PATH."
+        },
+        "florianVibe.vision.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Clé API du modèle vision pour le fallback image (chemin B), utilisé si vibe-acp refuse les images natives. Voir src/vision.ts."
+        },
+        "florianVibe.vision.model": {
+          "type": "string",
+          "default": "",
+          "description": "Modèle vision pour le fallback image (ex. pixtral-12b). Laisser vide pour désactiver le fallback."
         }
       }
     }

@@ -62,7 +62,11 @@ npm run compile
 
 ## Roadmap
 
-- [ ] Upload d'images (drag&drop + paste) — implémenté puis revert pour cause de bug, à refaire
+- [x] **Upload d'images — vision native** (bouton + / drag&drop / coller). L'extension envoie des blocs image ACP ; le modèle vision (ex. `mistral-medium-3.5`) les lit **via l'abonnement Mistral, sans clé API**.
+  - Prérequis : patcher `vibe-acp`, qui par défaut jette les images en ACP (`image=false`, pas de « sidecar plumbing »). Voir [`scripts/patch-vibe-images.py`](scripts/patch-vibe-images.py).
+  - ⚠️ `vibe-acp` est installé via `uv` → un `uv tool upgrade mistral-vibe` écrase le patch. **Relancer `python3 scripts/patch-vibe-images.py` après chaque upgrade.**
+  - `@chemin/image.png` fonctionne nativement dans le CLI/TUI (sidecar) mais **pas** en ACP sans le patch.
+  - Fallback `src/vision.ts` (description texte) conservé comme filet de sécurité si le patch est absent ; bug d'origine du revert = `img-src` manquant dans le CSP (corrigé).
 - [ ] Support terminal (vibe-acp `terminal/*`)
 - [ ] Slash commands
 - [ ] Persistence des conversations
