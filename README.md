@@ -44,12 +44,17 @@ Pas affilié à Mistral AI.
 
 ## Installation (en attendant la publication marketplace)
 
+**Option 1 — installer le `.vsix` pré-packagé** (le plus simple) :
+1. Télécharger le `.vsix` depuis la [dernière release](https://github.com/Flo-RL/florian-vibe/releases/latest).
+2. Dans VSCode : palette (`Ctrl+Shift+P`) → *Extensions: Install from VSIX…* → choisir le fichier.
+
+**Option 2 — compiler depuis les sources** :
 ```bash
-git clone https://github.com/<TODO-username>/florian-vibe.git
+git clone https://github.com/Flo-RL/florian-vibe.git
 cd florian-vibe
 npm install
 npm run compile
-# Pour packager : npm install -g @vscode/vsce && vsce package
+# Pour packager : npx @vscode/vsce package
 # Pour tester en dev : ouvrir le dossier dans VSCode + F5
 ```
 

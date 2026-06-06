@@ -5,6 +5,14 @@
   "version": "0.1.0",
   "publisher": "florian-vibe",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Flo-RL/florian-vibe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Flo-RL/florian-vibe/issues"
+  },
+  "homepage": "https://github.com/Flo-RL/florian-vibe#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -93,6 +101,7 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
     "typescript": "^5.4.0"
   },
   "dependencies": {

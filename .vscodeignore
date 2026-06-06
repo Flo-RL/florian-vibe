@@ -1,0 +1,13 @@
+.vscode/**
+.vscode-test/**
+src/**
+scripts/**
+**/*.ts
+**/*.map
+**/tsconfig.json
+**/.gitignore
+**/.git/**
+test-vision.png
+package-lock.json
+**/*.log
+.tmp/**
