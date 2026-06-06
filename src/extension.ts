@@ -257,6 +257,29 @@ class FlorianVibe {
     client.onRequest("terminal/kill", noTerminal);
   }
 
+  /** Crée l'objet ConversationPanel autour d'un WebviewPanel (neuf ou restauré) avec les callbacks standard. */
+  private buildPanel(panel: vscode.WebviewPanel): ConversationPanel {
+    const conv: ConversationPanel = new ConversationPanel(panel, this.client!,
+      (sessionId) => { this.panels.delete(sessionId); if (this.activePanel === conv) this.activePanel = undefined; },
+      () => { this.activePanel = conv; },
+      () => this.lastActiveUri,
+      this.output,
+      this.context.extensionUri,
+      () => this.listSessionsForHistory(),
+      (sessionId, title) => { void this.openSessionById(sessionId, title); },
+      () => { void this.openConversation(); }
+    );
+    return conv;
+  }
+
+  /** Callback d'enregistrement : référence le panel par sessionId + pousse le fichier actif. */
+  private registerPanel(conv: ConversationPanel): (sessionId: string) => void {
+    return (sessionId: string) => {
+      this.panels.set(sessionId, conv);
+      conv.updateActiveFile(this.activeFilePath);
+    };
+  }
+
   async openConversation(): Promise<void> {
     try {
       await this.ensureConnected();
@@ -271,26 +294,101 @@ class FlorianVibe {
       "florianVibe.chat",
       "Vibe",
       vscode.ViewColumn.Active,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [nodeModulesUri],
-      }
+      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [nodeModulesUri] }
     );
 
-    const conv = new ConversationPanel(panel, this.client,
-      (sessionId) => { this.panels.delete(sessionId); if (this.activePanel === conv) this.activePanel = undefined; },
-      () => { this.activePanel = conv; },
-      () => this.lastActiveUri,
-      this.output,
-      this.context.extensionUri
-    );
+    const conv = this.buildPanel(panel);
     this.activePanel = conv;
-    await conv.start((sessionId) => {
-      this.panels.set(sessionId, conv);
-      // état initial du fichier actif
-      conv.updateActiveFile(this.activeFilePath);
-    });
+    await conv.start(this.registerPanel(conv));
+  }
+
+  /**
+   * Appelé par le WebviewPanelSerializer au reload de VSCode : VSCode recrée le panel vide,
+   * on réapplique les options webview puis on reprend la session via session/load.
+   */
+  async restoreConversation(panel: vscode.WebviewPanel, sessionId?: string, title?: string): Promise<void> {
+    const nodeModulesUri = vscode.Uri.joinPath(this.context.extensionUri, "node_modules");
+    panel.webview.options = { enableScripts: true, localResourceRoots: [nodeModulesUri] };
+    try {
+      await this.ensureConnected();
+    } catch (e: any) {
+      panel.webview.html = `<body style="font-family:sans-serif;padding:16px">Florian Vibe : connexion à vibe-acp échouée (${e?.message}). Rechargez la fenêtre.</body>`;
+      return;
+    }
+    if (!this.client) return;
+
+    const conv = this.buildPanel(panel);
+    this.activePanel = conv;
+    if (sessionId) {
+      await conv.restore(this.registerPanel(conv), sessionId, title);
+    } else {
+      // Pas de sessionId persisté → on repart sur une session neuve
+      await conv.start(this.registerPanel(conv));
+    }
+  }
+
+  private fmtSessionDate(v: any): string {
+    if (!v) return "";
+    const d = new Date(typeof v === "number" && v < 1e12 ? v * 1000 : v);
+    return isNaN(d.getTime()) ? String(v) : d.toLocaleString();
+  }
+
+  /** Liste des conversations enregistrées (alimente le panneau in-app via session/list). */
+  async listSessionsForHistory(): Promise<{ sessionId: string; title: string; date: string }[]> {
+    try {
+      await this.ensureConnected();
+    } catch {
+      return [];
+    }
+    if (!this.client) return [];
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    try {
+      const res = await this.client.sendRequest("session/list", { cwd });
+      const sessions: any[] = res?.sessions ?? [];
+      return sessions
+        .filter((s) => s?.sessionId)
+        .map((s) => ({
+          sessionId: s.sessionId as string,
+          title: s.title?.trim() || "(sans titre)",
+          date: this.fmtSessionDate(s.updatedAt),
+        }));
+    } catch (e: any) {
+      this.output.appendLine(`[session/list] échec : ${e?.message}`);
+      return [];
+    }
+  }
+
+  /** Ouvre (ou met au premier plan) une conversation par son id — un onglet = une session. */
+  async openSessionById(sessionId: string, title?: string): Promise<void> {
+    const existing = this.panels.get(sessionId);
+    if (existing) { existing.reveal(); return; }
+    try {
+      await this.ensureConnected();
+    } catch (e: any) {
+      vscode.window.showErrorMessage(`Florian Vibe : ${e?.message}.`);
+      return;
+    }
+    if (!this.client) return;
+    const nodeModulesUri = vscode.Uri.joinPath(this.context.extensionUri, "node_modules");
+    const panel = vscode.window.createWebviewPanel(
+      "florianVibe.chat",
+      title?.trim() || "Vibe",
+      vscode.ViewColumn.Active,
+      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [nodeModulesUri] }
+    );
+    const conv = this.buildPanel(panel);
+    this.activePanel = conv;
+    await conv.restore(this.registerPanel(conv), sessionId, title);
+  }
+
+  /** Commande "Historique" (icône horloge de l'onglet) → ouvre le panneau in-app du panel actif. */
+  async showHistory(): Promise<void> {
+    let panel = this.activePanel;
+    if (!panel) {
+      await this.openConversation();
+      panel = this.activePanel;
+    }
+    panel?.openHistoryOverlay();
   }
 }
 
@@ -304,6 +402,11 @@ class ConversationPanel {
   private hasUnread = false;
   private titleSetFromPrompt = false;
   private clientMode: ClientMode = "default";
+  private sessionTitle?: string;
+  // Handshake : le webview poste { type: 'ready' } quand son script est prêt à recevoir des messages.
+  // Indispensable pour le replay (session/load) : les chunks rejoués ne doivent pas arriver avant.
+  private readyResolve: () => void = () => {};
+  private readonly ready: Promise<void> = new Promise<void>((r) => { this.readyResolve = r; });
   // Icône style Claude (étoile orange). sparkle existe en codicon natif.
   private static readonly ICON_IDLE = new vscode.ThemeIcon("sparkle", new vscode.ThemeColor("charts.orange"));
   private static readonly ICON_UNREAD = new vscode.ThemeIcon("sparkle-filled", new vscode.ThemeColor("charts.orange"));
@@ -315,7 +418,10 @@ class ConversationPanel {
     private readonly onActivate: () => void,
     private readonly getActiveUri: () => vscode.Uri | undefined,
     private readonly output: vscode.OutputChannel,
-    private readonly extensionUri: vscode.Uri
+    private readonly extensionUri: vscode.Uri,
+    private readonly listSessions: () => Promise<{ sessionId: string; title: string; date: string }[]>,
+    private readonly openSession: (sessionId: string, title?: string) => void,
+    private readonly openNew: () => void
   ) {
     panel.webview.html = this.html();
     panel.iconPath = ConversationPanel.ICON_IDLE;
@@ -333,6 +439,23 @@ class ConversationPanel {
 
     panel.webview.onDidReceiveMessage(async (msg) => {
       switch (msg.type) {
+        case "ready":
+          this.readyResolve();
+          break;
+        case "requestHistory": {
+          const sessions = await this.listSessions();
+          this.post({ type: "historyList", sessions });
+          break;
+        }
+        case "openSession":
+          this.openSession(msg.sessionId as string, msg.title as string | undefined);
+          break;
+        case "renameSession":
+          await this.renameSession(msg.title as string);
+          break;
+        case "newConversation":
+          this.openNew();
+          break;
         case "send":
           this.onActivate();
           await this.sendPrompt(msg.text as string, (msg.images as InlineImage[]) ?? []);
@@ -400,6 +523,52 @@ class ConversationPanel {
     this.panel.iconPath = ConversationPanel.ICON_UNREAD;
   }
 
+  reveal(): void {
+    this.panel.reveal();
+  }
+
+  /** Ouvre le panneau historique in-app (déclenché par l'icône horloge de l'onglet). */
+  openHistoryOverlay(): void {
+    this.panel.reveal();
+    this.post({ type: "openHistory" });
+  }
+
+  /** Renomme la session via l'extension ACP `_session/set_title` puis synchronise l'onglet + le header. */
+  private async renameSession(title: string): Promise<void> {
+    const clean = (title ?? "").trim();
+    if (!this.sessionId || !clean) return;
+    try {
+      await this.client.sendRequest("_session/set_title", { sessionId: this.sessionId, title: clean });
+      this.sessionTitle = clean;
+      this.panel.title = clean;
+      this.post({ type: "titleSet", sessionId: this.sessionId, title: clean });
+    } catch (e: any) {
+      this.output.appendLine(`[session/set_title] échec : ${e?.message}`);
+      this.post({ type: "system", text: `Renommage échoué : ${e?.message}` });
+      this.post({ type: "titleSet", sessionId: this.sessionId, title: this.sessionTitle ?? "Nouvelle conversation" });
+    }
+  }
+
+  /** Attend le handshake 'ready' du webview (avec garde-fou de 1.5s au cas où). */
+  private async awaitWebviewReady(): Promise<void> {
+    await Promise.race([this.ready, new Promise<void>((r) => setTimeout(r, 1500))]);
+  }
+
+  /** Active l'input et transmet modes/modèle — commun à session/new et session/load. */
+  private postSessionReady(result: any): void {
+    const serverModes = result?.modes?.availableModes?.map((m: any) => ({ value: m.id, name: m.name })) ?? [];
+    const modesToSend = serverModes.length > 0 ? serverModes : CLIENT_MODES;
+    const currentModeId = result?.modes?.currentModeId ?? this.clientMode;
+    this.post({
+      type: "sessionReady",
+      sessionId: this.sessionId,
+      currentModelId: result?.models?.currentModelId,
+      modes: modesToSend,
+      currentModeId,
+      title: this.sessionTitle,
+    });
+  }
+
   async start(register: (sessionId: string) => void): Promise<void> {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     try {
@@ -411,27 +580,57 @@ class ConversationPanel {
       const folderName = vscode.workspace.workspaceFolders?.[0]?.name ?? "Vibe";
       this.panel.title = `Vibe — ${folderName}`;
 
-      // Vibe ACP 2.x n'expose pas de modes côté serveur → on utilise nos modes client.
-      const serverModes = result.modes?.availableModes?.map((m: any) => ({ value: m.id, name: m.name })) ?? [];
-      const modesToSend = serverModes.length > 0 ? serverModes : CLIENT_MODES;
-      const currentModeId = result.modes?.currentModeId ?? this.clientMode;
-      this.post({
-        type: "sessionReady",
-        sessionId: this.sessionId,
-        currentModelId: result.models?.currentModelId,
-        modes: modesToSend,
-        currentModeId,
-      });
+      await this.awaitWebviewReady();
+      this.postSessionReady(result);
     } catch (e: any) {
       this.post({ type: "system", text: `Création de session échouée : ${e?.message}` });
     }
   }
 
+  /**
+   * Reprend une session existante (au reload de VSCode, ou depuis l'historique).
+   * Enregistre le panel AVANT session/load pour que les session/update rejoués soient routés ici,
+   * puis attend le handshake webview pour ne pas perdre les chunks du replay.
+   */
+  async restore(register: (sessionId: string) => void, sessionId: string, title?: string): Promise<void> {
+    this.sessionId = sessionId;
+    register(sessionId); // panels.set AVANT le load → le replay arrive bien dans ce panel
+    if (title?.trim()) {
+      this.sessionTitle = title.trim();
+      this.panel.title = this.sessionTitle;
+    } else {
+      const folderName = vscode.workspace.workspaceFolders?.[0]?.name ?? "Vibe";
+      this.panel.title = `Vibe — ${folderName}`;
+    }
+
+    await this.awaitWebviewReady();
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    try {
+      const result = await this.client.sendRequest("session/load", { sessionId, cwd, mcpServers: [] });
+      this.postSessionReady(result);
+    } catch (e: any) {
+      // Session introuvable / load refusé → on bascule sur une session neuve pour garder l'onglet utilisable
+      this.output.appendLine(`[session] reprise ${sessionId} échouée (${e?.message}) → nouvelle session`);
+      this.post({ type: "system", text: `Reprise impossible (${e?.message}) — nouvelle session.` });
+      this.sessionId = undefined;
+      await this.start(register);
+    }
+  }
+
   handleSessionUpdate(update: any): void {
     if (this.disposed) return;
-    const messageId = update?._meta?.messageId ?? this.currentMessageId ?? "unknown";
+    // En live : on groupe sous currentMessageId (le prompt en cours). En replay (session/load) :
+    // currentMessageId est absent → on prend le messageId porté par chaque update rejoué, ce qui
+    // sépare bien chaque message historique dans son propre bloc.
+    const messageId =
+      this.currentMessageId ??
+      update?.messageId ?? update?.message_id ?? update?._meta?.messageId ?? "unknown";
 
     switch (update?.sessionUpdate) {
+      case "user_message_chunk":
+        // Émis uniquement au replay (session/load) — affiche les prompts de l'utilisateur.
+        this.post({ type: "chunk", messageId, role: "user", text: update.content?.text ?? "" });
+        break;
       case "agent_message_chunk":
         this.post({ type: "chunk", messageId, role: "assistant", text: update.content?.text ?? "" });
         break;
@@ -759,6 +958,23 @@ class ConversationPanel {
   #lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: none; align-items: center; justify-content: center; z-index: 99999; cursor: zoom-out; padding: 32px; box-sizing: border-box; }
   #lightbox.visible { display: flex; }
   #lightbox img { max-width: 100%; max-height: 100%; border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,0.6); }
+  /* Barre d'en-tête (titre + actions), façon Claude Code — tout en haut */
+  #header { display: flex; align-items: center; gap: 6px; padding: 7px 12px; border-bottom: 1px solid var(--vscode-panel-border); flex-shrink: 0; }
+  #conv-title { flex: 1; min-width: 0; font-weight: 600; font-size: 0.95em; color: var(--vscode-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; padding: 3px 6px; border-radius: 6px; }
+  #conv-title:hover { background: var(--vscode-list-hoverBackground); }
+  #conv-title-input { flex: 1; min-width: 0; font-weight: 600; font-size: 0.95em; font-family: var(--vscode-font-family); background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--mode-color); border-radius: 6px; padding: 3px 6px; outline: none; display: none; }
+  .header-btn { background: transparent; color: var(--vscode-descriptionForeground); border: 0; padding: 4px 6px; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; min-width: 26px; }
+  .header-btn:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
+  /* Historique des conversations (panneau in-app façon Claude) — descend depuis le header */
+  #history-overlay { position: fixed; left: 0; right: 0; top: 46px; margin: 0 auto; max-width: 880px; width: calc(100% - 32px); max-height: 52vh; background: var(--vscode-menu-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.55); display: none; flex-direction: column; overflow: hidden; z-index: 9998; }
+  #history-overlay.visible { display: flex; }
+  #history-search { background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 0; border-bottom: 1px solid var(--vscode-panel-border); padding: 10px 14px; outline: none; font-family: var(--vscode-font-family); font-size: 0.92em; }
+  #history-list { overflow-y: auto; padding: 5px; }
+  .history-item { padding: 8px 12px; border-radius: 7px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .history-item:hover { background: var(--vscode-list-hoverBackground); }
+  .history-item .h-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--vscode-foreground); }
+  .history-item .h-date { flex-shrink: 0; color: var(--vscode-descriptionForeground); font-size: 0.8em; }
+  .history-empty { padding: 16px; color: var(--vscode-descriptionForeground); font-size: 0.88em; text-align: center; }
   #active-file { display: none; align-items: center; gap: 4px; font-size: 0.82em; }
   #active-file.visible { display: inline-flex; }
   #active-file .chip { background: transparent; border: 0; padding: 2px 6px; border-radius: 6px; font-family: var(--vscode-editor-font-family); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; color: var(--vscode-descriptionForeground); transition: color 0.15s, background 0.15s; }
@@ -805,6 +1021,16 @@ class ConversationPanel {
 </style>
 </head>
 <body>
+  <div id="header">
+    <div id="conv-title" title="Cliquer pour renommer">Nouvelle conversation</div>
+    <input id="conv-title-input" type="text" autocomplete="off">
+    <button class="header-btn" id="header-history-btn" type="button" title="Historique des conversations">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7.5 12 12 15 14"/></svg>
+    </button>
+    <button class="header-btn" id="header-new-btn" type="button" title="Nouvelle conversation">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </button>
+  </div>
   <div id="log"></div>
   <div id="input-area">
     <div id="compose">
@@ -840,6 +1066,10 @@ class ConversationPanel {
     <div id="status">Connexion à vibe-acp…</div>
   </div>
   <div id="lightbox"><img alt="aperçu"></div>
+  <div id="history-overlay">
+    <input id="history-search" type="text" placeholder="Rechercher une conversation…" autocomplete="off">
+    <div id="history-list"></div>
+  </div>
 <script nonce="${nonce}">
   let vscode;
   try { vscode = acquireVsCodeApi(); } catch (e) { console.error('acquireVsCodeApi failed', e); }
@@ -1260,6 +1490,98 @@ class ConversationPanel {
     });
   })();
 
+  // --- En-tête : titre éditable + nouvelle conversation ---
+  const convTitleEl = document.getElementById('conv-title');
+  const convTitleInput = document.getElementById('conv-title-input');
+  const headerNewBtn = document.getElementById('header-new-btn');
+  let currentSessionTitle = 'Nouvelle conversation';
+  let renaming = false;
+
+  function setTitleDisplay(title) {
+    currentSessionTitle = title && title.trim() ? title.trim() : 'Nouvelle conversation';
+    convTitleEl.textContent = currentSessionTitle;
+  }
+  function beginRename() {
+    renaming = true;
+    convTitleInput.value = currentSessionTitle === 'Nouvelle conversation' ? '' : currentSessionTitle;
+    convTitleEl.style.display = 'none';
+    convTitleInput.style.display = 'block';
+    convTitleInput.focus();
+    convTitleInput.select();
+  }
+  function endRename(save) {
+    if (!renaming) return; // évite un double déclenchement (Enter/Échap puis blur)
+    renaming = false;
+    const val = convTitleInput.value.trim();
+    convTitleInput.style.display = 'none';
+    convTitleEl.style.display = 'block';
+    if (save && val && val !== currentSessionTitle) {
+      setTitleDisplay(val); // optimiste
+      vscode.postMessage({ type: 'renameSession', title: val });
+    }
+  }
+  convTitleEl.addEventListener('click', beginRename);
+  convTitleInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); endRename(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); endRename(false); }
+  });
+  convTitleInput.addEventListener('blur', () => endRename(true));
+  headerNewBtn.addEventListener('click', () => vscode.postMessage({ type: 'newConversation' }));
+
+  // --- Historique des conversations (panneau in-app) ---
+  const historyBtn = document.getElementById('header-history-btn');
+  const historyOverlay = document.getElementById('history-overlay');
+  const historySearch = document.getElementById('history-search');
+  const historyList = document.getElementById('history-list');
+  let historyData = [];
+
+  function openHistory() {
+    historyOverlay.classList.add('visible');
+    historySearch.value = '';
+    historyList.innerHTML = '<div class="history-empty">Chargement…</div>';
+    vscode.postMessage({ type: 'requestHistory' });
+    historySearch.focus();
+  }
+  function closeHistory() { historyOverlay.classList.remove('visible'); }
+
+  function renderHistory() {
+    const q = historySearch.value.toLowerCase();
+    const items = historyData.filter((s) => !q || (s.title || '').toLowerCase().includes(q));
+    if (!items.length) {
+      historyList.innerHTML = '<div class="history-empty">Aucune conversation.</div>';
+      return;
+    }
+    historyList.innerHTML = '';
+    items.forEach((s) => {
+      const it = document.createElement('div');
+      it.className = 'history-item';
+      const t = document.createElement('span');
+      t.className = 'h-title';
+      t.textContent = s.title || '(sans titre)';
+      const d = document.createElement('span');
+      d.className = 'h-date';
+      d.textContent = s.date || '';
+      it.appendChild(t);
+      it.appendChild(d);
+      it.addEventListener('click', () => { vscode.postMessage({ type: 'openSession', sessionId: s.sessionId, title: s.title }); closeHistory(); });
+      historyList.appendChild(it);
+    });
+  }
+
+  historyBtn.addEventListener('click', () => {
+    if (historyOverlay.classList.contains('visible')) closeHistory(); else openHistory();
+  });
+  historySearch.addEventListener('input', renderHistory);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && historyOverlay.classList.contains('visible')) closeHistory();
+  });
+  // Clic en dehors du panneau (et pas sur le bouton) → ferme
+  document.addEventListener('click', (e) => {
+    if (!historyOverlay.classList.contains('visible')) return;
+    if (historyOverlay.contains(e.target) || historyBtn.contains(e.target)) return;
+    closeHistory();
+  });
+
   // Affiche les images d'un message user sous forme de chips cliquables (façon Claude Code)
   function attachUserImages(messageId, imgs) {
     const div = blocks.get(messageId + ':user');
@@ -1420,6 +1742,9 @@ class ConversationPanel {
     switch (m.type) {
       case 'sessionReady':
         status.textContent = 'Session : ' + (m.currentModelId ?? 'prête');
+        if (m.title) setTitleDisplay(m.title);
+        // Persisté pour le WebviewPanelSerializer : recharge CETTE conversation (et son titre) au reload
+        try { vscode.setState({ sessionId: m.sessionId, title: currentSessionTitle }); } catch (_) {}
         input.disabled = false;
         sendBtn.disabled = false;
         uploadBtn.disabled = false;
@@ -1435,6 +1760,18 @@ class ConversationPanel {
       case 'modeChanged':
         currentModeId = m.modeId;
         updateModeButton();
+        break;
+      case 'historyList':
+        historyData = Array.isArray(m.sessions) ? m.sessions : [];
+        renderHistory();
+        break;
+      case 'openHistory':
+        openHistory();
+        break;
+      case 'titleSet':
+        // Confirmation (ou correction) du titre après renommage côté serveur
+        setTitleDisplay(m.title);
+        try { vscode.setState({ sessionId: m.sessionId, title: currentSessionTitle }); } catch (_) {}
         break;
       case 'userMessage':
         appendToBlock('user', m.messageId, m.text);
@@ -1483,6 +1820,10 @@ class ConversationPanel {
     }
   });
 
+  // Handshake : signale à l'extension que le webview est prêt à recevoir des messages
+  // (sessionReady / chunks de replay). Doit partir APRÈS l'enregistrement du listener ci-dessus.
+  vscode.postMessage({ type: 'ready' });
+
 </script>
 <!-- Libs chargées en bas pour ne pas bloquer le main script -->
 <script src="${markedUri}"></script>
@@ -1499,7 +1840,14 @@ let app: FlorianVibe;
 export function activate(context: vscode.ExtensionContext) {
   app = new FlorianVibe(context);
   context.subscriptions.push(
+    // Restaure les onglets de conversation après un reload de la fenêtre VSCode
+    vscode.window.registerWebviewPanelSerializer("florianVibe.chat", {
+      deserializeWebviewPanel: async (panel, state: any) => {
+        await app.restoreConversation(panel, state?.sessionId, state?.title);
+      },
+    }),
     vscode.commands.registerCommand("florianVibe.open", () => app.openConversation()),
+    vscode.commands.registerCommand("florianVibe.history", () => app.showHistory()),
     vscode.commands.registerCommand("florianVibe.openWithFile", async (uri?: vscode.Uri) => {
       // uri vient du menu contextuel ; si appelé via palette/raccourci, fallback sur le doc actif
       let target = uri ?? vscode.window.activeTextEditor?.document.uri;

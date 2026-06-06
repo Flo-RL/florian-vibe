@@ -25,13 +25,23 @@
       {
         "command": "florianVibe.openWithFile",
         "title": "Florian Vibe: Nouvelle conversation avec ce fichier"
+      },
+      {
+        "command": "florianVibe.history",
+        "title": "Florian Vibe: Historique des conversations",
+        "icon": "$(history)"
       }
     ],
     "menus": {
       "editor/title": [
         {
+          "command": "florianVibe.history",
+          "group": "navigation@1",
+          "when": "activeWebviewPanelId == florianVibe.chat"
+        },
+        {
           "command": "florianVibe.open",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ],
       "explorer/context": [

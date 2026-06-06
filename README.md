@@ -69,7 +69,8 @@ npm run compile
   - Fallback `src/vision.ts` (description texte) conservé comme filet de sécurité si le patch est absent ; bug d'origine du revert = `img-src` manquant dans le CSP (corrigé).
 - [ ] Support terminal (vibe-acp `terminal/*`)
 - [ ] Slash commands
-- [ ] Persistence des conversations
+- [x] **Persistence des conversations** — les onglets survivent au reload de VSCode (`WebviewPanelSerializer` + `vscode.setState({sessionId, title})`), historique rejoué via `session/load`.
+  - **Barre d'en-tête** en haut (façon Claude Code) : titre de la conversation **éditable** (renommage via `_session/set_title`), bouton **Historique** (panneau in-app avec recherche, `session/list`), bouton **Nouvelle conversation**.
 
 ## Licence
 
