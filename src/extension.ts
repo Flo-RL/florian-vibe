@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "fs/promises";
+import * as os from "os";
+import * as path from "path";
 import { execFile } from "child_process";
 import { randomUUID } from "crypto";
 import { AcpClient } from "./acp-client";
@@ -479,13 +481,34 @@ class ConversationPanel {
           break;
         case "toggleContext":
           this.contextDisabled = !this.contextDisabled;
-          // Re-confirme l'état au frontend
           this.post({
             type: "activeFile",
             filePath: this.currentContextFile,
             disabled: this.contextDisabled,
           });
           break;
+        case "invokeSkill": {
+          const skillName = msg.skillName as string;
+          const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+          const candidates = [
+            path.join(os.homedir(), ".vibe", "skills", skillName, "SKILL.md"),
+            path.join(cwd, ".vibe", "skills", skillName, "SKILL.md"),
+          ];
+          let body = "";
+          for (const candidate of candidates) {
+            try {
+              const content = await fs.readFile(candidate, "utf8");
+              const parts = content.split(/^---\s*$/m);
+              body = parts.length >= 3 ? parts.slice(2).join("---").trim() : content.trim();
+              break;
+            } catch { continue; }
+          }
+          if (body) {
+            this.onActivate();
+            await this.sendPrompt(body, []);
+          }
+          break;
+        }
       }
     });
 
@@ -554,6 +577,35 @@ class ConversationPanel {
     await Promise.race([this.ready, new Promise<void>((r) => setTimeout(r, 1500))]);
   }
 
+  /** Scanne ~/.vibe/skills/ et .vibe/skills/ (projet) et retourne les skills trouvés. */
+  private async scanSkills(): Promise<{ name: string; description: string }[]> {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    const dirs = [
+      path.join(os.homedir(), ".vibe", "skills"),
+      path.join(cwd, ".vibe", "skills"),
+    ];
+    const skills: { name: string; description: string }[] = [];
+    const seen = new Set<string>();
+    for (const dir of dirs) {
+      let entries: string[];
+      try { entries = await fs.readdir(dir); } catch { continue; }
+      for (const entry of entries) {
+        const skillFile = path.join(dir, entry, "SKILL.md");
+        let content: string;
+        try { content = await fs.readFile(skillFile, "utf8"); } catch { continue; }
+        const parts = content.split(/^---\s*$/m);
+        if (parts.length < 3) continue;
+        const fm = parts[1];
+        const nameMatch = fm.match(/^name\s*:\s*["']?(.+?)["']?\s*$/m);
+        const descMatch = fm.match(/^description\s*:\s*["']?(.+?)["']?\s*$/m);
+        const name = (nameMatch?.[1] ?? entry).trim();
+        const description = (descMatch?.[1] ?? "").replace(/^"|"$/g, "").trim();
+        if (!seen.has(name)) { seen.add(name); skills.push({ name, description }); }
+      }
+    }
+    return skills;
+  }
+
   /** Active l'input et transmet modes/modèle — commun à session/new et session/load. */
   private postSessionReady(result: any): void {
     const serverModes = result?.modes?.availableModes?.map((m: any) => ({ value: m.id, name: m.name })) ?? [];
@@ -566,6 +618,9 @@ class ConversationPanel {
       modes: modesToSend,
       currentModeId,
       title: this.sessionTitle,
+    });
+    this.scanSkills().then((skills) => {
+      if (skills.length > 0) this.post({ type: "skillsReady", skills });
     });
   }
 
@@ -905,7 +960,15 @@ class ConversationPanel {
   .msg.thought.expanded .thinking-label .caret { transform: rotate(180deg); }
   .msg.thought .thinking-content { font-style: italic; margin-top: 6px; white-space: pre-wrap; word-wrap: break-word; padding-left: 0; border-left: 0; }
   .msg.thought .thinking-content.collapsed { display: none; }
-  .msg.system { color: var(--vscode-descriptionForeground); font-size: 0.85em; padding: 4px 12px; }
+  .msg.system { color: var(--vscode-descriptionForeground); font-size: 0.85em; padding: 4px 12px; white-space: pre-wrap; }
+  #slash-menu { position: absolute; bottom: calc(100% + 4px); left: 0; right: 0; max-width: 540px; background: var(--vscode-menu-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border)); border-radius: 8px; padding: 4px 0; display: none; z-index: 9999; box-shadow: 0 6px 20px rgba(0,0,0,0.5); }
+  #slash-menu.visible { display: block; }
+  .slash-item { padding: 6px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; border-radius: 4px; margin: 1px 3px; }
+  .slash-item:hover, .slash-item.active { background: var(--vscode-list-hoverBackground); }
+  .slash-item .slash-name { font-family: var(--vscode-editor-font-family); font-weight: 600; color: var(--vscode-charts-orange); min-width: 80px; }
+  .slash-item.skill .slash-name { color: var(--vscode-charts-blue, #75beff); }
+  .slash-item .slash-args { font-family: var(--vscode-editor-font-family); color: var(--vscode-descriptionForeground); font-size: 0.85em; min-width: 55px; }
+  .slash-item .slash-desc { color: var(--vscode-descriptionForeground); font-size: 0.88em; flex: 1; }
   .thinking-indicator { display: flex; align-items: center; gap: 10px; color: var(--vscode-descriptionForeground); font-size: 0.92em; margin: 18px 0; padding: 0; }
   .thinking-indicator::before { content: "●"; color: var(--vscode-charts-orange); flex-shrink: 0; font-size: 0.7em; line-height: 1; margin-top: 0.55em; animation: vibe-pulse 1.2s ease-in-out infinite; }
   @keyframes vibe-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -938,7 +1001,7 @@ class ConversationPanel {
   .diff-actions .accept { background: var(--vscode-charts-green); color: var(--vscode-foreground); }
   .diff-actions .reject { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .diff-actions .done { color: var(--vscode-descriptionForeground); padding: 4px 14px; font-size: 0.85em; }
-  #input-area { padding: 12px 16px 14px; max-width: 920px; width: 100%; margin: 0 auto; box-sizing: border-box; }
+  #input-area { padding: 12px 16px 14px; max-width: 920px; width: 100%; margin: 0 auto; box-sizing: border-box; position: relative; }
   #compose { background: var(--vscode-input-background); border: 1px solid var(--mode-color); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; transition: border-color 0.15s, box-shadow 0.15s; }
   #compose:focus-within { box-shadow: 0 0 0 1px var(--mode-color); }
   #compose.dragover { border-color: var(--mode-color); box-shadow: 0 0 0 2px var(--mode-color); }
@@ -1033,6 +1096,7 @@ class ConversationPanel {
   </div>
   <div id="log"></div>
   <div id="input-area">
+    <div id="slash-menu"></div>
     <div id="compose">
       <div id="attachments"></div>
       <textarea id="prompt" placeholder="ctrl esc to focus or unfocus Vibe" rows="1" disabled></textarea>
@@ -1040,7 +1104,7 @@ class ConversationPanel {
       <div id="compose-actions">
         <div class="left">
           <button class="compose-action-btn" id="upload-btn" type="button" title="Joindre une image (ou coller / glisser-déposer)" disabled>+</button>
-          <button class="compose-action-btn" id="slash-btn" type="button" title="Slash commands (à venir)" disabled style="opacity:0.4">/</button>
+          <button class="compose-action-btn" id="slash-btn" type="button" title="Slash commands">/</button>
           <div id="active-file">
             <span class="chip" id="active-file-chip" title="Cliquer pour inclure/exclure du contexte">
               <span class="file-icon">📄</span>
@@ -1704,6 +1768,17 @@ class ConversationPanel {
   function send() {
     if (busy) return;
     const text = input.value.trim();
+    if (text.charAt(0) === '/') {
+      var sp = text.indexOf(' ');
+      var scmd = sp >= 0 ? text.slice(1, sp) : text.slice(1);
+      var sargs = sp >= 0 ? text.slice(sp + 1).trim() : '';
+      if (scmd.length > 0 && executeSlashCommand(scmd, sargs)) {
+        input.value = '';
+        input.style.height = 'auto';
+        closeSlashMenu();
+        return;
+      }
+    }
     if (!text && attachments.length === 0 && pendingReads === 0) return;
     // Des images finissent de charger : on diffère l'envoi (relancé depuis FileReader.onload)
     if (pendingReads > 0) {
@@ -1725,7 +1800,14 @@ class ConversationPanel {
   sendBtn.addEventListener('click', send);
   cancelBtn.addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
   input.addEventListener('keydown', (e) => {
-    // Entrée seule = envoyer ; Maj+Entrée = saut de ligne
+    var menuOpen = slashMenuEl && slashMenuEl.classList.contains('visible');
+    if (menuOpen) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveSlashSelection(1); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); moveSlashSelection(-1); return; }
+      if (e.key === 'Escape') { e.preventDefault(); closeSlashMenu(); return; }
+      if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); completeSlashItem(slashFiltered[slashSelectedIdx]); return; }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); completeSlashItem(slashFiltered[slashSelectedIdx]); return; }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -1735,6 +1817,7 @@ class ConversationPanel {
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+    updateSlashMenu();
   });
 
   window.addEventListener('message', (event) => {
@@ -1817,7 +1900,165 @@ class ConversationPanel {
           activeFileEl.classList.remove('visible');
         }
         break;
+      case 'skillsReady':
+        vibeSkills = m.skills || [];
+        break;
     }
+  });
+
+  // --- Slash menu ---
+  var slashMenuEl = document.getElementById('slash-menu');
+  var slashBtn = document.getElementById('slash-btn');
+  var SLASH_COMMANDS = [
+    { name: 'clear',   args: '',         desc: 'Efface la conversation' },
+    { name: 'new',     args: '',         desc: 'Nouvelle conversation' },
+    { name: 'mode',    args: '[nom]',    desc: 'Affiche ou change le mode' },
+    { name: 'context', args: '[on|off]', desc: 'Active/desactive le contexte' },
+    { name: 'help',    args: '',         desc: 'Liste les commandes' },
+  ];
+  var slashFiltered = [];
+  var slashSelectedIdx = -1;
+  var vibeSkills = [];
+
+  function openSlashMenu(items) {
+    slashFiltered = items;
+    slashSelectedIdx = 0;
+    slashMenuEl.innerHTML = '';
+    for (var i = 0; i < items.length; i++) {
+      var cmd = items[i];
+      var item = document.createElement('div');
+      item.className = 'slash-item' + (i === 0 ? ' active' : '') + (cmd.type === 'skill' ? ' skill' : '');
+      var nameEl = document.createElement('span');
+      nameEl.className = 'slash-name';
+      nameEl.textContent = '/' + cmd.name;
+      var argsEl = document.createElement('span');
+      argsEl.className = 'slash-args';
+      argsEl.textContent = cmd.args;
+      var descEl = document.createElement('span');
+      descEl.className = 'slash-desc';
+      descEl.textContent = cmd.desc;
+      item.appendChild(nameEl);
+      item.appendChild(argsEl);
+      item.appendChild(descEl);
+      item.dataset.idx = String(i);
+      item.addEventListener('mousedown', function(ev) {
+        ev.preventDefault();
+        completeSlashItem(slashFiltered[parseInt(this.dataset.idx, 10)]);
+      });
+      slashMenuEl.appendChild(item);
+    }
+    slashMenuEl.classList.add('visible');
+  }
+
+  function closeSlashMenu() {
+    slashMenuEl.classList.remove('visible');
+    slashFiltered = [];
+    slashSelectedIdx = -1;
+  }
+
+  function updateSlashMenu() {
+    var val = input.value;
+    if (val.indexOf('/') !== 0 || val.indexOf(' ') >= 0) { closeSlashMenu(); return; }
+    var typed = val.slice(1).toLowerCase();
+    var filtered = SLASH_COMMANDS.filter(function(c) { return c.name.indexOf(typed) === 0; });
+    for (var vi = 0; vi < vibeSkills.length; vi++) {
+      var sk = vibeSkills[vi];
+      if (sk.name.toLowerCase().indexOf(typed) === 0) {
+        var shortDesc = sk.description.length > 55 ? sk.description.slice(0, 52) + '...' : sk.description;
+        filtered.push({ name: sk.name, args: '', desc: shortDesc, type: 'skill' });
+      }
+    }
+    if (filtered.length === 0) { closeSlashMenu(); return; }
+    openSlashMenu(filtered);
+  }
+
+  function completeSlashItem(cmd) {
+    var suffix = cmd.args ? ' ' : '';
+    input.value = '/' + cmd.name + suffix;
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+    closeSlashMenu();
+    input.focus();
+  }
+
+  function moveSlashSelection(delta) {
+    if (slashFiltered.length === 0) return;
+    slashSelectedIdx = Math.max(0, Math.min(slashFiltered.length - 1, slashSelectedIdx + delta));
+    var items = slashMenuEl.querySelectorAll('.slash-item');
+    for (var i = 0; i < items.length; i++) {
+      items[i].classList.toggle('active', i === slashSelectedIdx);
+    }
+  }
+
+  function executeSlashCommand(cmd, args) {
+    var cmdLow = cmd.toLowerCase();
+    var cmdFound = false;
+    for (var ci = 0; ci < SLASH_COMMANDS.length; ci++) {
+      if (SLASH_COMMANDS[ci].name === cmdLow) { cmdFound = true; break; }
+    }
+    if (!cmdFound) return false;
+    if (cmdLow === 'clear') {
+      log.innerHTML = '';
+      blocks.clear();
+      blockText.clear();
+      addSystemMessage('Conversation effacee.');
+    } else if (cmdLow === 'new') {
+      vscode.postMessage({ type: 'newConversation' });
+    } else if (cmdLow === 'help') {
+      var helpLines = ['Commandes :'];
+      for (var hi = 0; hi < SLASH_COMMANDS.length; hi++) {
+        var hcmd = SLASH_COMMANDS[hi];
+        helpLines.push('  /' + hcmd.name + (hcmd.args ? ' ' + hcmd.args : '') + ' - ' + hcmd.desc);
+      }
+      addSystemMessage(helpLines.join('\\n'));
+    } else if (cmdLow === 'context') {
+      vscode.postMessage({ type: 'toggleContext' });
+    } else if (cmdLow === 'mode') {
+      if (args) {
+        var argLow2 = args.toLowerCase();
+        var modeTarget2 = null;
+        for (var mi2 = 0; mi2 < availableModes.length; mi2++) {
+          var mm2 = availableModes[mi2];
+          if (mm2.value.toLowerCase() === argLow2 || mm2.value.toLowerCase().indexOf(argLow2) === 0) {
+            modeTarget2 = mm2; break;
+          }
+        }
+        if (modeTarget2) {
+          currentModeId = modeTarget2.value;
+          updateModeButton();
+          vscode.postMessage({ type: 'setMode', modeId: modeTarget2.value });
+        } else {
+          var modeNames2 = availableModes.map(function(x) { return x.value; }).join(', ');
+          addSystemMessage('Mode inconnu. Disponibles : ' + modeNames2);
+        }
+      } else {
+        var modeLines2 = ['Mode actif : ' + modeLabelFor(currentModeId)];
+        for (var mii2 = 0; mii2 < availableModes.length; mii2++) {
+          modeLines2.push('  /mode ' + availableModes[mii2].value);
+        }
+        addSystemMessage(modeLines2.join('\\n'));
+      }
+    } else {
+      for (var ski = 0; ski < vibeSkills.length; ski++) {
+        if (vibeSkills[ski].name.toLowerCase() === cmdLow) {
+          vscode.postMessage({ type: 'invokeSkill', skillName: vibeSkills[ski].name });
+          return true;
+        }
+      }
+      return false;
+    }
+    return true;
+  }
+
+  slashBtn.addEventListener('click', function() {
+    if (busy) return;
+    if (!input.value) { input.value = '/'; input.focus(); updateSlashMenu(); }
+    else input.focus();
+  });
+
+  document.addEventListener('click', function(e) {
+    if (!slashMenuEl.classList.contains('visible')) return;
+    if (!slashMenuEl.contains(e.target) && e.target !== input && e.target !== slashBtn) closeSlashMenu();
   });
 
   // Handshake : signale à l'extension que le webview est prêt à recevoir des messages
