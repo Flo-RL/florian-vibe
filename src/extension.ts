@@ -9,7 +9,7 @@ import { prepareDiff, DiffLine } from "./diff-view";
 import { askPermission } from "./permission";
 import { describeImage, InlineImage } from "./vision";
 
-const EXTENSION_VERSION = "0.1.0";
+const EXTENSION_VERSION = "0.1.1";
 
 type PromptBlock =
   | { type: "text"; text: string }
@@ -2076,10 +2076,77 @@ ${prismLangs.map((uri) => `<script src="${uri}"></script>`).join("\n")}
   }
 }
 
+class VibeTreeItem extends vscode.TreeItem {
+  constructor(label: string, iconId: string, command?: vscode.Command) {
+    super(label, vscode.TreeItemCollapsibleState.None);
+    this.iconPath = new vscode.ThemeIcon(iconId);
+    if (command) this.command = command;
+  }
+}
+
+class VibeSidebarProvider implements vscode.TreeDataProvider<VibeTreeItem> {
+  private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+  constructor(private readonly extVersion: string) {}
+
+  refresh(): void { this._onDidChangeTreeData.fire(); }
+
+  getTreeItem(element: VibeTreeItem): vscode.TreeItem { return element; }
+
+  getChildren(): VibeTreeItem[] {
+    const cfg = vscode.workspace.getConfiguration("florianVibe");
+    const acpPath = cfg.get<string>("acpBinaryPath", "").trim() || "auto";
+    const visionModel = cfg.get<string>("vision.model", "").trim() || "—";
+
+    return [
+      new VibeTreeItem("Vérifier les mises à jour", "sync", {
+        command: "florianVibe.checkForUpdates",
+        title: "Vérifier les mises à jour",
+      }),
+      new VibeTreeItem(`v${this.extVersion}`, "tag"),
+      new VibeTreeItem(`ACP : ${acpPath}`, "settings-gear", {
+        command: "workbench.action.openSettings",
+        title: "Paramètres ACP",
+        arguments: ["@id:florianVibe.acpBinaryPath"],
+      }),
+      new VibeTreeItem(`Vision : ${visionModel}`, "eye", {
+        command: "workbench.action.openSettings",
+        title: "Paramètres Vision",
+        arguments: ["@id:florianVibe.vision.model"],
+      }),
+      new VibeTreeItem("Patch images vibe-acp", "puzzle", {
+        command: "florianVibe.patchImages",
+        title: "Appliquer le patch images",
+      }),
+    ];
+  }
+}
+
 let app: FlorianVibe;
 
 export function activate(context: vscode.ExtensionContext) {
   app = new FlorianVibe(context);
+
+  const sidebar = new VibeSidebarProvider(EXTENSION_VERSION);
+  context.subscriptions.push(
+    vscode.window.registerTreeDataProvider("florianVibe.sidebar", sidebar),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("florianVibe")) sidebar.refresh();
+    }),
+    vscode.commands.registerCommand("florianVibe.patchImages", () => {
+      const extDir = context.extensionUri.fsPath;
+      const scriptPath = path.join(extDir, "scripts", "patch-vibe-images.py");
+      execFile("python3", [scriptPath], (_err, stdout, stderr) => {
+        if (_err) {
+          vscode.window.showErrorMessage(`Patch échoué : ${_err.message}\n${stderr}`);
+        } else {
+          vscode.window.showInformationMessage("Patch images appliqué. Redémarre vibe-acp pour que ça prenne effet.");
+        }
+      });
+    })
+  );
+
   context.subscriptions.push(
     // Restaure les onglets de conversation après un reload de la fenêtre VSCode
     vscode.window.registerWebviewPanelSerializer("florianVibe.chat", {
@@ -2100,6 +2167,56 @@ export function activate(context: vscode.ExtensionContext) {
       await vscode.window.showTextDocument(target, { preview: false });
       // Puis ouvre le panel chat — le fichier sera automatiquement utilisé comme contexte
       await app.openConversation();
+    }),
+    vscode.commands.registerCommand("florianVibe.checkForUpdates", async () => {
+      const extDir = context.extensionUri.fsPath;
+
+      const run = (cmd: string, args: string[]): Promise<string> =>
+        new Promise((resolve, reject) =>
+          execFile(cmd, args, { cwd: extDir }, (err, stdout) =>
+            err ? reject(err) : resolve(stdout.trim())
+          )
+        );
+
+      try {
+        await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: "Florian Vibe", cancellable: false },
+          async (progress) => {
+            progress.report({ message: "Vérification des mises à jour…" });
+            await run("git", ["fetch", "origin"]);
+
+            const count = parseInt(await run("git", ["rev-list", "HEAD..origin/main", "--count"]), 10);
+            if (count === 0) {
+              vscode.window.showInformationMessage("Florian Vibe est déjà à jour.");
+              return;
+            }
+
+            const action = await vscode.window.showInformationMessage(
+              `${count} commit(s) disponible(s) sur GitHub. Mettre à jour ?`,
+              "Mettre à jour",
+              "Annuler"
+            );
+            if (action !== "Mettre à jour") return;
+
+            progress.report({ message: "git pull…" });
+            await run("git", ["pull"]);
+
+            progress.report({ message: "Compilation…" });
+            await run("npm", ["run", "compile"]);
+
+            const reload = await vscode.window.showInformationMessage(
+              "Mise à jour effectuée. Recharger la fenêtre pour appliquer ?",
+              "Recharger",
+              "Plus tard"
+            );
+            if (reload === "Recharger") {
+              vscode.commands.executeCommand("workbench.action.reloadWindow");
+            }
+          }
+        );
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Mise à jour échouée : ${err.message}`);
+      }
     })
   );
 }

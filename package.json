@@ -2,7 +2,7 @@
   "name": "florian-vibe",
   "displayName": "Florian Vibe",
   "description": "Chat panel pour Mistral Vibe dans VSCode via ACP. Multi-conversations en onglets, séparation propre thinking/réponse. Inspiré du travail de Nicolas Mallet (vscode-mistral-vibe, Apache-2.0).",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "florian-vibe",
   "license": "Apache-2.0",
   "repository": {
@@ -24,6 +24,23 @@
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "florianVibe",
+          "title": "Florian Vibe",
+          "icon": "media/vibe-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "florianVibe": [
+        {
+          "id": "florianVibe.sidebar",
+          "name": "Florian Vibe"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "florianVibe.open",
@@ -38,6 +55,16 @@
         "command": "florianVibe.history",
         "title": "Florian Vibe: Historique des conversations",
         "icon": "$(history)"
+      },
+      {
+        "command": "florianVibe.checkForUpdates",
+        "title": "Florian Vibe: Vérifier les mises à jour",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "florianVibe.patchImages",
+        "title": "Florian Vibe: Patch images vibe-acp",
+        "icon": "$(puzzle)"
       }
     ],
     "menus": {
@@ -50,6 +77,11 @@
         {
           "command": "florianVibe.open",
           "group": "navigation@2"
+        },
+        {
+          "command": "florianVibe.checkForUpdates",
+          "group": "navigation@3",
+          "when": "activeWebviewPanelId == florianVibe.chat"
         }
       ],
       "explorer/context": [
