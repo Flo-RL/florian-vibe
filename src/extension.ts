@@ -887,6 +887,13 @@ class ConversationPanel {
         sessionId: this.sessionId,
         modeId,
       });
+      // Si le mode serveur a une sémantique auto-approve, aligner clientMode pour que
+      // fs/write_text_file et session/request_permission skippent aussi les confirmations.
+      if (/auto|approve|accept|bypass|yolo/i.test(modeId)) {
+        this.clientMode = "auto-edit";
+      } else {
+        this.clientMode = "default";
+      }
       this.post({ type: "modeChanged", modeId });
     } catch (e: any) {
       this.post({ type: "system", text: `Changement de mode échoué : ${e?.message}` });
