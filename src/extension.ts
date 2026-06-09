@@ -955,7 +955,10 @@ class ConversationPanel {
   .msg.assistant .body ul, .msg.assistant .body ol { margin: 0.4em 0; padding-left: 1.5em; }
   .msg.assistant .body li { margin: 0.15em 0; }
   .msg.assistant .body code { background: var(--vscode-textCodeBlock-background); padding: 1px 5px; border-radius: 3px; font-family: var(--vscode-editor-font-family); font-size: 0.92em; }
-  .msg.assistant .body pre { background: var(--vscode-textCodeBlock-background) !important; padding: 10px 12px; border-radius: 4px; overflow-x: auto; margin: 0.5em 0; font-family: var(--vscode-editor-font-family); }
+  .msg.assistant .body pre { background: var(--vscode-textCodeBlock-background) !important; padding: 10px 12px; border-radius: 4px; overflow-x: auto; margin: 0.5em 0; font-family: var(--vscode-editor-font-family); position: relative; }
+  .copy-btn { position: absolute; top: 6px; right: 6px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 2px 8px; border-radius: 3px; font-size: 0.75em; cursor: pointer; opacity: 0; transition: opacity 0.15s; font-family: var(--vscode-font-family); }
+  .msg.assistant .body pre:hover .copy-btn { opacity: 1; }
+  .copy-btn.copied { color: var(--vscode-charts-green); }
   .msg.assistant .body pre[class*="language-"] { background: var(--vscode-textCodeBlock-background) !important; text-shadow: none; }
   .msg.assistant .body pre code { background: transparent !important; padding: 0; font-size: 0.9em; line-height: 1.4; font-family: var(--vscode-editor-font-family); text-shadow: none; }
   .msg.assistant .body code[class*="language-"], .msg.assistant .body pre[class*="language-"] { font-family: var(--vscode-editor-font-family); text-shadow: none; }
@@ -1354,6 +1357,29 @@ class ConversationPanel {
     return div;
   }
 
+  function addCopyButtons(container) {
+    var pres = container.querySelectorAll('pre');
+    for (var i = 0; i < pres.length; i++) {
+      (function(pre) {
+        if (pre.querySelector('.copy-btn')) return;
+        var btn = document.createElement('button');
+        btn.className = 'copy-btn';
+        btn.textContent = 'Copy';
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          var code = pre.querySelector('code');
+          var text = code ? code.textContent : pre.textContent;
+          navigator.clipboard.writeText(text || '').then(function() {
+            btn.textContent = 'Copied!';
+            btn.classList.add('copied');
+            setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+          });
+        });
+        pre.appendChild(btn);
+      })(pres[i]);
+    }
+  }
+
   // Stockage du texte brut accumulé par bloc → permet de re-parser le markdown à chaque chunk
   const blockText = new Map();
 
@@ -1382,6 +1408,7 @@ class ConversationPanel {
         if (typeof Prism !== 'undefined' && Prism.highlightAllUnder) {
           try { Prism.highlightAllUnder(target); } catch (_e) {}
         }
+        addCopyButtons(target);
       } else {
         target.textContent = accumulated;
       }
