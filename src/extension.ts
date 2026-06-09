@@ -231,15 +231,16 @@ class FlorianVibe {
         const stored = this.toolCallTitles.get(p.toolCall.toolCallId);
         if (stored) p.toolCall.title = stored;
       }
-      // En mode bypass, on auto-allow la première option qui ressemble à allow
-      if (this.activePanel?.currentClientMode === "bypass") {
+      // En mode auto-edit ou bypass, on auto-allow la première option qui ressemble à allow
+      const activeMode = this.activePanel?.currentClientMode;
+      if (activeMode === "bypass" || activeMode === "auto-edit") {
         const options = p?.options ?? [];
         const allow = options.find((o: any) =>
           /allow|approve|accept/i.test(o.optionId ?? "") || /allow|approve|accept/i.test(o.name ?? "")
         );
         const picked = allow ?? options[0];
         if (picked) {
-          this.output.appendLine(`[ACP permission] (bypass) auto-allow → ${picked.optionId}`);
+          this.output.appendLine(`[ACP permission] (${activeMode}) auto-allow → ${picked.optionId}`);
           return { outcome: { outcome: "selected", optionId: picked.optionId } };
         }
       }
