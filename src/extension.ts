@@ -55,6 +55,7 @@ class FlorianVibe {
   private connecting?: Promise<void>;
   private readonly panels = new Map<string, ConversationPanel>(); // sessionId → panel
   private readonly toolCallTitles = new Map<string, string>();    // toolCallId → title
+  private readonly toolCallSessions = new Map<string, string>();  // toolCallId → sessionId
   private activePanel?: ConversationPanel;                        // dernier panel actif
   private readonly output: vscode.OutputChannel;
 
@@ -186,8 +187,9 @@ class FlorianVibe {
       // Mémorise les titres des tool calls — utile quand une permission arrive
       // plus tard et que son toolCall.title n'est pas inclus.
       const u = params.update;
-      if (u?.sessionUpdate === "tool_call" && u.toolCallId && u.title) {
-        this.toolCallTitles.set(u.toolCallId, u.title);
+      if (u?.sessionUpdate === "tool_call" && u.toolCallId) {
+        if (u.title) this.toolCallTitles.set(u.toolCallId, u.title);
+        this.toolCallSessions.set(u.toolCallId, params.sessionId);
       }
       const panel = this.panels.get(params.sessionId);
       if (panel) panel.handleSessionUpdate(u);
@@ -199,7 +201,8 @@ class FlorianVibe {
     });
 
     client.onRequest("fs/write_text_file", async (p: { path: string; content: string }) => {
-      const panel = this.activePanel;
+      const sessionId = (p as any).sessionId as string | undefined;
+      const panel = (sessionId ? this.panels.get(sessionId) : undefined) ?? this.activePanel;
       if (!panel) {
         throw new Error("Pas de panel chat actif pour afficher le diff");
       }
@@ -231,8 +234,12 @@ class FlorianVibe {
         const stored = this.toolCallTitles.get(p.toolCall.toolCallId);
         if (stored) p.toolCall.title = stored;
       }
+      // Route vers le panel de la session qui a généré la permission, pas le panel actif VSCode
+      const sessionId: string | undefined =
+        p?.sessionId ?? (p?.toolCall?.toolCallId ? this.toolCallSessions.get(p.toolCall.toolCallId) : undefined);
+      const targetPanel = (sessionId ? this.panels.get(sessionId) : undefined) ?? this.activePanel;
       // En mode auto-edit ou bypass, on auto-allow la première option qui ressemble à allow
-      const activeMode = this.activePanel?.currentClientMode;
+      const activeMode = targetPanel?.currentClientMode;
       if (activeMode === "bypass" || activeMode === "auto-edit") {
         const options = p?.options ?? [];
         const allow = options.find((o: any) =>

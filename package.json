@@ -2,7 +2,7 @@
   "name": "florian-vibe",
   "displayName": "Florian Vibe",
   "description": "Chat panel pour Mistral Vibe dans VSCode via ACP. Multi-conversations en onglets, séparation propre thinking/réponse. Inspiré du travail de Nicolas Mallet (vscode-mistral-vibe, Apache-2.0).",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "florian-vibe",
   "license": "Apache-2.0",
   "repository": {
