@@ -9,7 +9,6 @@ import { prepareDiff, DiffLine } from "./diff-view";
 import { askPermission } from "./permission";
 import { describeImage, InlineImage } from "./vision";
 
-const EXTENSION_VERSION = "0.1.1";
 
 type PromptBlock =
   | { type: "text"; text: string }
@@ -129,7 +128,7 @@ class FlorianVibe {
 
     const initResult = await client.sendRequest("initialize", {
       protocolVersion: 1,
-      clientInfo: { name: "florian-vibe", version: EXTENSION_VERSION },
+      clientInfo: { name: "florian-vibe", version: this.context.extension.packageJSON.version as string },
       clientCapabilities: {
         terminal: false,
         fs: { readTextFile: true, writeTextFile: true },
@@ -2136,7 +2135,7 @@ let app: FlorianVibe;
 export function activate(context: vscode.ExtensionContext) {
   app = new FlorianVibe(context);
 
-  const sidebar = new VibeSidebarProvider(EXTENSION_VERSION);
+  const sidebar = new VibeSidebarProvider(context.extension.packageJSON.version as string);
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("florianVibe.sidebar", sidebar),
     vscode.workspace.onDidChangeConfiguration((e) => {
